@@ -24,6 +24,9 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
 use openinfer_engine::engine::{EngineHandle, GenerateRequest, TokenEvent, TokenLogprob};
+use openinfer_engine::request_trace::{
+    RequestTrace, RequestTraceConfig, RequestTraceFields, RequestTraceTerminal, TRACE_LOG_MARKER,
+};
 
 use crate::wire::{
     convert_finish_reason, convert_sampling, lora_adapter_from_sampling_params, requested_logprobs,
@@ -37,6 +40,7 @@ pub(crate) struct LocalEngineBridge {
     pub(crate) output_address: String,
     pub(crate) handle: EngineHandle,
     pub(crate) max_model_len: u32,
+    pub(crate) trace_config: RequestTraceConfig,
 }
 
 impl LocalEngineBridge {
@@ -201,11 +205,21 @@ impl LocalEngineBridge {
             return Ok(());
         };
 
+        let trace =
+            RequestTrace::from_config(&self.trace_config, request_id.clone(), request.arrival_time);
+        trace.record_at(
+            "frontend.request_received",
+            request.arrival_time,
+            RequestTraceFields::default(),
+        );
+        trace.record("frontend.submit_begin", RequestTraceFields::default());
+
         let (token_tx, token_rx) = mpsc::unbounded_channel();
         self.handle
             .submit(GenerateRequest {
                 request_id: Some(request_id.clone()),
                 queued_at_unix_s: Some(request.arrival_time),
+                trace: trace.clone(),
                 prompt_tokens,
                 params: convert_sampling(&sampling_params),
                 max_tokens: sampling_params.max_tokens as usize,
@@ -215,12 +229,13 @@ impl LocalEngineBridge {
                 echo: false,
             })
             .context("failed to submit request to scheduler")?;
+        trace.record("frontend.submit_end", RequestTraceFields::default());
 
         let output_tx = output_tx.clone();
         let done_tx = done_tx.clone();
         let task_request_id = request_id.clone();
         let task = tokio::spawn(async move {
-            run_request_stream(task_request_id.clone(), token_rx, output_tx).await;
+            run_request_stream(task_request_id.clone(), token_rx, output_tx, trace).await;
             let _ = done_tx.send(task_request_id);
         });
         active.insert(request_id, task);
@@ -233,10 +248,12 @@ async fn run_request_stream(
     request_id: String,
     mut token_rx: mpsc::UnboundedReceiver<TokenEvent>,
     output_tx: mpsc::UnboundedSender<EngineCoreOutputs>,
+    trace: RequestTrace,
 ) {
     let mut first_token_events = None;
     let mut first_token_prefill_stats = None;
     let mut has_sent_token_output = false;
+    let mut first_token_seen = false;
     let mut pending_event = None;
     loop {
         let event = match pending_event.take() {
@@ -253,6 +270,15 @@ async fn run_request_stream(
                 prompt_tokens,
                 cached_tokens,
             } => {
+                trace.record_at(
+                    "scheduler.admitted",
+                    scheduled_at_unix_s,
+                    RequestTraceFields {
+                        prompt_tokens: Some(prompt_tokens),
+                        cached_tokens: Some(cached_tokens),
+                        ..Default::default()
+                    },
+                );
                 first_token_events = Some(vec![
                     EngineCoreEvent {
                         r#type: EngineCoreEventType::Queued,
@@ -275,6 +301,13 @@ async fn run_request_stream(
                 });
             }
             TokenEvent::Token { id, logprob } => {
+                if !first_token_seen {
+                    trace.record(
+                        "frontend.first_token_received",
+                        RequestTraceFields::default(),
+                    );
+                    first_token_seen = true;
+                }
                 // Keep the first streamed token on the direct path so TTFT
                 // does not pay an extra scheduler turn. Later decode bursts
                 // still benefit from one-turn coalescing before draining the
@@ -297,16 +330,21 @@ async fn run_request_stream(
                 {
                     return;
                 }
+                trace.record("frontend.output_sent", RequestTraceFields::default());
                 has_sent_token_output = true;
             }
             TokenEvent::PromptTokens { .. } => {
                 // Prompt logprobs are intentionally deferred for this bridge.
             }
-            TokenEvent::Finished { finish_reason, .. } => {
+            TokenEvent::Finished {
+                finish_reason,
+                prompt_tokens,
+                completion_tokens,
+            } => {
                 // A request can finish without emitting a token (EOS sampled
                 // on prefill) — flush the pending scheduled events and prefill
                 // stats with the terminal output or they are lost.
-                let _ = send_terminal_output(
+                let result = send_terminal_output(
                     &output_tx,
                     request_id,
                     convert_finish_reason(finish_reason),
@@ -314,11 +352,24 @@ async fn run_request_stream(
                     first_token_events.take(),
                     first_token_prefill_stats.take(),
                 );
+                if result.is_ok() {
+                    trace.record("frontend.output_sent", RequestTraceFields::default());
+                }
+                trace.finish(RequestTraceTerminal {
+                    finish_reason: format!("{finish_reason:?}").to_ascii_lowercase(),
+                    prompt_tokens,
+                    completion_tokens,
+                });
+                emit_trace_summary(&trace);
                 return;
             }
-            TokenEvent::Error { message, .. } => {
+            TokenEvent::Error {
+                message,
+                prompt_tokens,
+                completion_tokens,
+            } => {
                 warn!("request {request_id} failed: {message}");
-                let _ = send_terminal_output(
+                let result = send_terminal_output(
                     &output_tx,
                     request_id,
                     EngineCoreFinishReason::Error,
@@ -326,12 +377,25 @@ async fn run_request_stream(
                     None,
                     None,
                 );
+                if result.is_ok() {
+                    trace.record("frontend.output_sent", RequestTraceFields::default());
+                }
+                trace.finish(RequestTraceTerminal {
+                    finish_reason: "error".to_string(),
+                    prompt_tokens,
+                    completion_tokens,
+                });
+                emit_trace_summary(&trace);
                 return;
             }
-            TokenEvent::Rejected { message, .. } => {
+            TokenEvent::Rejected {
+                message,
+                prompt_tokens,
+                completion_tokens,
+            } => {
                 // Rejected means the request could not be admitted, not that it completed cleanly.
                 warn!("request {request_id} rejected: {message}");
-                let _ = send_terminal_output(
+                let result = send_terminal_output(
                     &output_tx,
                     request_id,
                     EngineCoreFinishReason::Error,
@@ -339,9 +403,24 @@ async fn run_request_stream(
                     None,
                     None,
                 );
+                if result.is_ok() {
+                    trace.record("frontend.output_sent", RequestTraceFields::default());
+                }
+                trace.finish(RequestTraceTerminal {
+                    finish_reason: "error".to_string(),
+                    prompt_tokens,
+                    completion_tokens,
+                });
+                emit_trace_summary(&trace);
                 return;
             }
         }
+    }
+}
+
+fn emit_trace_summary(trace: &RequestTrace) {
+    if let Some(json) = trace.summary_json() {
+        info!("{TRACE_LOG_MARKER} {json}");
     }
 }
 
@@ -559,6 +638,8 @@ async fn wait_for_ipc_endpoint(address: &str, shutdown: &CancellationToken) -> R
 #[cfg(test)]
 mod tests {
     use openinfer_engine::engine::FinishReason;
+    use openinfer_engine::request_trace::RequestTrace;
+    use serde_json::Value;
 
     use super::*;
 
@@ -576,7 +657,13 @@ mod tests {
             .expect("send rejected event");
         drop(token_tx);
 
-        run_request_stream("req-1".to_string(), token_rx, output_tx).await;
+        run_request_stream(
+            "req-1".to_string(),
+            token_rx,
+            output_tx,
+            RequestTrace::disabled(),
+        )
+        .await;
 
         let outputs = output_rx.recv().await.expect("terminal output");
         assert!(
@@ -637,7 +724,13 @@ mod tests {
             .expect("send finished");
         drop(token_tx);
 
-        run_request_stream("req-1".to_string(), token_rx, output_tx).await;
+        run_request_stream(
+            "req-1".to_string(),
+            token_rx,
+            output_tx,
+            RequestTrace::disabled(),
+        )
+        .await;
 
         let token_outputs = output_rx.recv().await.expect("token output");
         assert_eq!(token_outputs.outputs.len(), 1);
@@ -706,7 +799,13 @@ mod tests {
             .expect("send second token");
         drop(token_tx);
 
-        run_request_stream("req-2".to_string(), token_rx, output_tx).await;
+        run_request_stream(
+            "req-2".to_string(),
+            token_rx,
+            output_tx,
+            RequestTrace::disabled(),
+        )
+        .await;
 
         let first_batch = output_rx.recv().await.expect("first batch");
         let second_batch = output_rx.recv().await.expect("second batch");
@@ -754,7 +853,13 @@ mod tests {
             .expect("send finished");
         drop(token_tx);
 
-        run_request_stream("req-stop".to_string(), token_rx, output_tx).await;
+        run_request_stream(
+            "req-stop".to_string(),
+            token_rx,
+            output_tx,
+            RequestTrace::disabled(),
+        )
+        .await;
 
         let terminal = output_rx.recv().await.expect("terminal output");
         let output = &terminal.outputs[0];
@@ -794,7 +899,13 @@ mod tests {
             .expect("send token with logprob");
         drop(token_tx);
 
-        run_request_stream("req-3".to_string(), token_rx, output_tx).await;
+        run_request_stream(
+            "req-3".to_string(),
+            token_rx,
+            output_tx,
+            RequestTrace::disabled(),
+        )
+        .await;
 
         let batch = output_rx.recv().await.expect("batched output");
         let direct = match batch.outputs[0]
@@ -811,6 +922,55 @@ mod tests {
         assert!(direct.positions[0].entries.is_empty());
         assert_eq!(direct.positions[1].entries[0].token_id, 32);
         assert!(output_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_stream_records_trace_summary() {
+        let (token_tx, token_rx) = mpsc::unbounded_channel();
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel();
+        let trace = RequestTrace::enabled("req-trace".to_string(), 1.0);
+        trace.record_at("frontend.submit_end", 1.010, RequestTraceFields::default());
+
+        token_tx
+            .send(TokenEvent::Scheduled {
+                queued_at_unix_s: 1.0,
+                scheduled_at_unix_s: 1.020,
+                prompt_tokens: 3,
+                cached_tokens: 0,
+            })
+            .expect("send scheduled");
+        token_tx
+            .send(TokenEvent::Token {
+                id: 31,
+                logprob: None,
+            })
+            .expect("send token");
+        token_tx
+            .send(TokenEvent::Finished {
+                finish_reason: FinishReason::Length,
+                prompt_tokens: 3,
+                completion_tokens: 1,
+            })
+            .expect("send finished");
+        drop(token_tx);
+
+        run_request_stream("req-trace".to_string(), token_rx, output_tx, trace.clone()).await;
+
+        let token_output = output_rx.recv().await.expect("token output");
+        assert_eq!(token_output.outputs[0].new_token_ids, vec![31]);
+        let terminal = output_rx.recv().await.expect("terminal output");
+        assert_eq!(
+            terminal.outputs[0].finish_reason,
+            Some(EngineCoreFinishReason::Length)
+        );
+
+        let json = trace.summary_json().expect("trace summary");
+        let summary: Value = serde_json::from_str(&json).expect("summary json");
+        assert_eq!(summary["request_id"], "req-trace");
+        assert_eq!(summary["prompt_tokens"], 3);
+        assert_eq!(summary["completion_tokens"], 1);
+        assert!(summary["first_token_emit_unix_s"].is_number());
+        assert!(summary["stream_flush_ms"].is_number());
     }
 
     #[test]

@@ -10,6 +10,9 @@ pub mod logging;
 pub mod ops;
 pub mod page_pool;
 pub mod parallel;
+pub mod request_trace {
+    pub use openinfer_engine::request_trace::*;
+}
 pub mod sampler;
 pub mod tensor;
 pub mod weight_loader;

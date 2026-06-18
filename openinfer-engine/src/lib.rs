@@ -2,4 +2,5 @@
 
 pub mod engine;
 pub mod parallel;
+pub mod request_trace;
 pub mod sampler;

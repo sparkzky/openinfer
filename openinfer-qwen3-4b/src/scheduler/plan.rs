@@ -1,5 +1,7 @@
 use anyhow::Result;
+use openinfer_core::request_trace::RequestTraceFields;
 use rand::rngs::StdRng;
+use std::time::Instant;
 
 use crate::executor::{
     DecodePlan, DecodeResult, DecodeStepItem, ModelExecutor, PrefillPlan, PrefillResult,
@@ -57,13 +59,18 @@ pub(super) fn execute_plan(
     match plan {
         ExecutionPlan::Prefill { pending } => {
             let scheduled_at_unix_s = openinfer_core::engine::unix_now_s();
+            record_pending_admitted(&pending, scheduled_at_unix_s);
             let indices: Vec<usize> = (0..pending.len()).collect();
             let requests = build_prefill_items(&pending, &indices, rng);
             let any_echo = pending.iter().any(|req| req.echo);
+            let started = Instant::now();
             let mut result = executor.execute_prefill(PrefillPlan {
                 requests: &requests,
                 echo: any_echo,
             })?;
+            let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record_pending_forward(&pending, "model.forward.prefill", duration_ms);
+            record_pending_step(&pending, "scheduler.step", "prefill", pending.len(), 0);
             sort_prefill_results(&mut result.requests);
             Ok(ExecutionArtifacts::Prefill {
                 pending,
@@ -74,22 +81,45 @@ pub(super) fn execute_plan(
         ExecutionPlan::Decode => {
             let indices: Vec<usize> = (0..active.len()).collect();
             let requests = build_decode_items(active, &indices, rng);
+            let started = Instant::now();
             let mut result = executor.execute_decode(DecodePlan {
                 requests: &requests,
             })?;
+            let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record_active_forward(active, "model.forward.decode", duration_ms);
+            record_active_step(active, "scheduler.step", "decode", 0, active.len());
             sort_decode_results(&mut result.requests);
             Ok(ExecutionArtifacts::Decode { result })
         }
         ExecutionPlan::Unified { pending } => {
             let scheduled_at_unix_s = openinfer_core::engine::unix_now_s();
+            record_pending_admitted(&pending, scheduled_at_unix_s);
             let pending_indices: Vec<usize> = (0..pending.len()).collect();
             let active_indices: Vec<usize> = (0..active.len()).collect();
             let prefill_requests = build_prefill_items(&pending, &pending_indices, rng);
             let decode_requests = build_decode_items(active, &active_indices, rng);
+            let started = Instant::now();
             let mut result = executor.execute_unified(UnifiedPlan {
                 prefill_requests: &prefill_requests,
                 decode_requests: &decode_requests,
             })?;
+            let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+            record_pending_forward(&pending, "model.forward.unified", duration_ms);
+            record_active_forward(active, "model.forward.unified", duration_ms);
+            record_pending_step(
+                &pending,
+                "scheduler.step",
+                "unified",
+                pending.len(),
+                active.len(),
+            );
+            record_active_step(
+                active,
+                "scheduler.step",
+                "unified",
+                pending.len(),
+                active.len(),
+            );
             sort_prefill_results(&mut result.prefill_requests);
             sort_decode_results(&mut result.decode_requests);
             Ok(ExecutionArtifacts::Unified {
@@ -98,6 +128,84 @@ pub(super) fn execute_plan(
                 scheduled_at_unix_s,
             })
         }
+    }
+}
+
+fn record_pending_admitted(pending: &[PendingRequest], scheduled_at_unix_s: f64) {
+    for req in pending {
+        req.trace.record_at(
+            "scheduler.admitted",
+            scheduled_at_unix_s,
+            RequestTraceFields {
+                prompt_tokens: Some(req.prompt_tokens.len()),
+                cached_tokens: Some(req.cached_tokens),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn record_pending_forward(pending: &[PendingRequest], name: &'static str, duration_ms: f64) {
+    for req in pending {
+        req.trace.record(
+            name,
+            RequestTraceFields {
+                duration_ms: Some(duration_ms),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn record_active_forward(active: &[ActiveRequestState], name: &'static str, duration_ms: f64) {
+    for req in active {
+        req.trace.record(
+            name,
+            RequestTraceFields {
+                duration_ms: Some(duration_ms),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn record_pending_step(
+    pending: &[PendingRequest],
+    name: &'static str,
+    phase: &'static str,
+    pending_batch_size: usize,
+    decode_batch_size: usize,
+) {
+    for req in pending {
+        req.trace.record(
+            name,
+            RequestTraceFields {
+                phase: Some(phase),
+                active_set_size: Some(pending_batch_size + decode_batch_size),
+                decode_batch_size: Some(decode_batch_size),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+fn record_active_step(
+    active: &[ActiveRequestState],
+    name: &'static str,
+    phase: &'static str,
+    pending_batch_size: usize,
+    decode_batch_size: usize,
+) {
+    for req in active {
+        req.trace.record(
+            name,
+            RequestTraceFields {
+                phase: Some(phase),
+                active_set_size: Some(pending_batch_size + decode_batch_size),
+                decode_batch_size: Some(decode_batch_size),
+                ..Default::default()
+            },
+        );
     }
 }
 
@@ -168,6 +276,7 @@ mod tests {
         PendingRequest {
             request_id: RequestId::new(0),
             lora_adapter: None,
+            trace: openinfer_core::request_trace::RequestTrace::disabled(),
             prompt_tokens: vec![1, 2, 3],
             params: SamplingParams::default(),
             max_tokens: 8,

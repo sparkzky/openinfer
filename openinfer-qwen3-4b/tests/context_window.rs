@@ -54,6 +54,7 @@ fn generate_text(
         .submit(GenerateRequest {
             request_id: None,
             queued_at_unix_s: None,
+            trace: Default::default(),
             prompt_tokens,
             params: SamplingParams::default(),
             max_tokens,
@@ -104,6 +105,7 @@ fn oversized_prompt_is_rejected_with_context_length_error() {
         .submit(GenerateRequest {
             request_id: None,
             queued_at_unix_s: None,
+            trace: Default::default(),
             prompt_tokens,
             params: SamplingParams::default(),
             max_tokens: 8,

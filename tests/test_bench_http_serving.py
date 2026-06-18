@@ -143,6 +143,7 @@ class BenchHttpServingTests(unittest.TestCase):
             'INFO openinfer_http_trace {"request_id":"cmpl-bench-1-generated",'
             '"queued_at_unix_s":100.01,"scheduled_at_unix_s":100.03,'
             '"first_token_emit_unix_s":100.20,"prefill_ms":170.0,'
+            '"scheduler_prefill_ms":170.0,"scheduler_decode_ms":33.0,'
             '"first_decode_ms":28.0}\\n'
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -156,6 +157,8 @@ class BenchHttpServingTests(unittest.TestCase):
         self.assertAlmostEqual(result.server_trace["admission_queue_ms"], 20.0, places=3)
         self.assertAlmostEqual(result.server_trace["stream_flush_ms"], 50.0, places=3)
         self.assertAlmostEqual(result.server_trace["frontend_to_queue_ms"], 10.0, places=3)
+        self.assertAlmostEqual(result.server_trace["scheduler_prefill_ms"], 170.0, places=3)
+        self.assertAlmostEqual(result.server_trace["scheduler_decode_ms"], 33.0, places=3)
 
     def test_server_stream_error_log_marks_request_failed(self) -> None:
         result = bench_http_serving.RequestResult(

@@ -9,6 +9,7 @@ use std::{
 use tokio::sync::{mpsc, oneshot};
 
 use crate::parallel::ParallelConfig;
+use crate::request_trace::RequestTrace;
 use crate::sampler::SamplingParams;
 
 #[derive(Clone, Debug)]
@@ -65,6 +66,7 @@ pub enum FinishReason {
 pub struct GenerateRequest {
     pub request_id: Option<String>,
     pub queued_at_unix_s: Option<f64>,
+    pub trace: RequestTrace,
     pub prompt_tokens: Vec<u32>,
     pub params: SamplingParams,
     pub max_tokens: usize,

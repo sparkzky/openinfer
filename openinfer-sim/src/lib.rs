@@ -4,6 +4,7 @@ use anyhow::{Result, ensure};
 use openinfer_engine::engine::{
     EngineHandle, FinishReason, GenerateRequest, TokenEvent, TokenLogprob,
 };
+use openinfer_engine::request_trace::{RequestTraceFields, RequestTraceTerminal};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Copy, Debug)]
@@ -76,6 +77,15 @@ async fn run_simulated_request(req: GenerateRequest, config: SimulatedEngineConf
     let queued_at_unix_s = req.queued_at_unix_s.unwrap_or_else(now_secs_f64);
     let prompt_len = req.prompt_tokens.len();
     let mut completion_tokens = 0;
+    req.trace.record_at(
+        "scheduler.admitted",
+        now_secs_f64(),
+        RequestTraceFields {
+            prompt_tokens: Some(prompt_len),
+            cached_tokens: Some(0),
+            ..Default::default()
+        },
+    );
 
     if req
         .token_tx
@@ -103,7 +113,15 @@ async fn run_simulated_request(req: GenerateRequest, config: SimulatedEngineConf
     }
 
     if req.max_tokens > 0 {
-        tokio::time::sleep(config.ttft(prompt_len)).await;
+        let ttft = config.ttft(prompt_len);
+        tokio::time::sleep(ttft).await;
+        req.trace.record(
+            "model.forward.prefill",
+            RequestTraceFields {
+                duration_ms: Some(ttft.as_secs_f64() * 1000.0),
+                ..Default::default()
+            },
+        );
     }
 
     for index in 0..req.max_tokens {
@@ -115,6 +133,10 @@ async fn run_simulated_request(req: GenerateRequest, config: SimulatedEngineConf
             logprob: 0.0,
             top_logprobs: Vec::new(),
         });
+        if index == 0 {
+            req.trace
+                .record("scheduler.first_token", RequestTraceFields::default());
+        }
         if req
             .token_tx
             .send(TokenEvent::Token {
@@ -130,6 +152,11 @@ async fn run_simulated_request(req: GenerateRequest, config: SimulatedEngineConf
 
     let _ = req.token_tx.send(TokenEvent::Finished {
         finish_reason: FinishReason::Length,
+        prompt_tokens: prompt_len,
+        completion_tokens,
+    });
+    req.trace.finish(RequestTraceTerminal {
+        finish_reason: "length".to_string(),
         prompt_tokens: prompt_len,
         completion_tokens,
     });
@@ -186,6 +213,7 @@ mod tests {
             GenerateRequest {
                 request_id: Some("req-1".to_string()),
                 queued_at_unix_s: Some(1.0),
+                trace: openinfer_engine::request_trace::RequestTrace::disabled(),
                 prompt_tokens: vec![7, 9],
                 params: SamplingParams::default(),
                 max_tokens: 3,
@@ -234,5 +262,49 @@ mod tests {
                 completion_tokens: 3
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn request_trace_records_simulated_scheduler_and_forward_events() {
+        let config = SimulatedEngineConfig::new(0.0, 100.0, 0.0, 42).unwrap();
+        let (token_tx, mut token_rx) = mpsc::unbounded_channel();
+        let trace =
+            openinfer_engine::request_trace::RequestTrace::enabled("sim-trace".to_string(), 1.0);
+
+        run_simulated_request(
+            GenerateRequest {
+                request_id: Some("sim-trace".to_string()),
+                queued_at_unix_s: Some(1.0),
+                trace: trace.clone(),
+                prompt_tokens: vec![7, 9],
+                params: SamplingParams::default(),
+                max_tokens: 1,
+                lora_adapter: None,
+                token_tx,
+                logprobs: 0,
+                echo: false,
+            },
+            config,
+        )
+        .await;
+
+        loop {
+            match token_rx.recv().await {
+                Some(TokenEvent::Finished {
+                    finish_reason: FinishReason::Length,
+                    ..
+                }) => break,
+                Some(_) => {}
+                None => panic!("simulated request stream closed before Finished"),
+            }
+        }
+
+        let summary = trace.summary().expect("trace summary");
+        assert_eq!(summary.request_id, "sim-trace");
+        assert_eq!(summary.prompt_tokens, 2);
+        assert_eq!(summary.completion_tokens, 1);
+        assert_eq!(summary.scheduler_prefill_ms, Some(0.0));
+        assert!(summary.scheduled_at_unix_s.is_some());
+        assert!(summary.first_token_emit_unix_s.is_some());
     }
 }

@@ -46,6 +46,7 @@ fn generate(handle: &EngineHandle, prompt_tokens: Vec<u32>, params: SamplingPara
         .submit(GenerateRequest {
             request_id: None,
             queued_at_unix_s: None,
+            trace: Default::default(),
             prompt_tokens,
             params,
             max_tokens: GENERATED_TOKENS,

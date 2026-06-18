@@ -18,6 +18,7 @@ use vllm_server::{
 };
 
 use openinfer_engine::engine::EngineHandle;
+use openinfer_engine::request_trace::RequestTraceConfig;
 
 mod bridge;
 mod lora;
@@ -56,6 +57,25 @@ pub async fn serve(
     port: u16,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    serve_with_trace_config(
+        engine,
+        model_path,
+        served_model_name,
+        port,
+        shutdown,
+        RequestTraceConfig::default(),
+    )
+    .await
+}
+
+pub async fn serve_with_trace_config(
+    engine: impl Future<Output = Result<EngineHandle>> + Send + 'static,
+    model_path: &Path,
+    served_model_name: Option<&str>,
+    port: u16,
+    shutdown: CancellationToken,
+    trace_config: RequestTraceConfig,
+) -> Result<()> {
     let max_model_len = load_max_model_len(model_path).unwrap_or_else(|| {
         const FALLBACK_MAX_MODEL_LEN: u32 = 4096;
         warn!(
@@ -76,6 +96,7 @@ pub async fn serve(
         port,
         max_model_len,
         shutdown,
+        trace_config,
     )
     .await
 }
@@ -88,6 +109,27 @@ pub async fn serve_model(
     max_model_len: u32,
     shutdown: CancellationToken,
 ) -> Result<()> {
+    serve_model_with_trace_config(
+        handle,
+        model_id,
+        served_model_name,
+        port,
+        max_model_len,
+        shutdown,
+        RequestTraceConfig::default(),
+    )
+    .await
+}
+
+pub async fn serve_model_with_trace_config(
+    handle: EngineHandle,
+    model_id: impl Into<String>,
+    served_model_name: Vec<String>,
+    port: u16,
+    max_model_len: u32,
+    shutdown: CancellationToken,
+    trace_config: RequestTraceConfig,
+) -> Result<()> {
     let model_id = model_id.into();
     serve_model_on_host(
         std::future::ready(Ok(handle)),
@@ -97,6 +139,7 @@ pub async fn serve_model(
         port,
         max_model_len,
         shutdown,
+        trace_config,
     )
     .await
 }
@@ -109,6 +152,30 @@ pub async fn serve_model_with_lora_routes(
     port: u16,
     max_model_len: u32,
     shutdown: CancellationToken,
+) -> Result<()> {
+    serve_model_with_lora_routes_and_trace_config(
+        handle,
+        model_id,
+        served_model_name,
+        lora_modules,
+        port,
+        max_model_len,
+        shutdown,
+        RequestTraceConfig::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_model_with_lora_routes_and_trace_config(
+    handle: EngineHandle,
+    model_id: impl Into<String>,
+    served_model_name: Vec<String>,
+    lora_modules: Vec<LoraModule>,
+    port: u16,
+    max_model_len: u32,
+    shutdown: CancellationToken,
+    trace_config: RequestTraceConfig,
 ) -> Result<()> {
     let model_id = model_id.into();
     let adapter_names = Arc::new(RwLock::new(HashSet::new()));
@@ -125,6 +192,7 @@ pub async fn serve_model_with_lora_routes(
         port,
         max_model_len,
         shutdown,
+        trace_config,
         move |router| {
             let lora_router = lora_routes(handle.clone(), Arc::clone(&adapter_names));
             let openai_router = lora_openai_routes(
@@ -147,6 +215,7 @@ async fn serve_model_on_host(
     port: u16,
     max_model_len: u32,
     shutdown: CancellationToken,
+    trace_config: RequestTraceConfig,
 ) -> Result<()> {
     serve_model_on_host_with_router_extension(
         engine,
@@ -156,6 +225,7 @@ async fn serve_model_on_host(
         port,
         max_model_len,
         shutdown,
+        trace_config,
         |router| router,
     )
     .await
@@ -169,6 +239,7 @@ async fn serve_model_on_host_with_router_extension<F>(
     port: u16,
     max_model_len: u32,
     shutdown: CancellationToken,
+    trace_config: RequestTraceConfig,
     extend_router: F,
 ) -> Result<()>
 where
@@ -193,6 +264,7 @@ where
         let bridge_shutdown = bridge_shutdown.clone();
         let input_address = input_address.clone();
         let output_address = output_address.clone();
+        let trace_config = trace_config.clone();
         async move {
             let handle = match engine.await {
                 Ok(handle) => handle,
@@ -208,6 +280,7 @@ where
                 output_address,
                 handle,
                 max_model_len: servable_limit.unwrap_or(max_model_len),
+                trace_config,
             };
             if let Err(error) = bridge.run(bridge_shutdown).await {
                 warn!("local vLLM engine bridge exited: {error:#}");

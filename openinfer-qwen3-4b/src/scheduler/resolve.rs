@@ -86,6 +86,7 @@ fn resolve_prefill_outputs(
         if !req.params.ignore_eos && executor.is_stop_token(result.first_token) {
             effects.pending.push(PendingEffect::Finish {
                 request_id: req.request_id,
+                trace: req.trace,
                 token_tx: req.token_tx,
                 finish_reason: FinishReason::Stop,
                 prompt_tokens: prompt_len,
@@ -97,6 +98,7 @@ fn resolve_prefill_outputs(
         if req.max_tokens <= 1 {
             effects.pending.push(PendingEffect::EmitAndFinish {
                 request_id: req.request_id,
+                trace: req.trace,
                 token_tx: req.token_tx,
                 token: result.first_token,
                 logprob: result.first_token_logprob,
@@ -111,6 +113,7 @@ fn resolve_prefill_outputs(
             state: ActiveRequestState {
                 request_id: req.request_id,
                 lora_adapter: req.lora_adapter,
+                trace: req.trace,
                 token_tx: req.token_tx,
                 last_token: result.first_token,
                 generated_count: 1,

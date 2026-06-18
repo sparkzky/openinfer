@@ -1096,6 +1096,7 @@ mod tests {
         GenerateRequest {
             request_id: None,
             queued_at_unix_s: None,
+            trace: openinfer_core::request_trace::RequestTrace::disabled(),
             prompt_tokens,
             params: SamplingParams::default(),
             max_tokens,

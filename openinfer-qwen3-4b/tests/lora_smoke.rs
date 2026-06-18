@@ -172,6 +172,7 @@ fn generate_tokens(
         .submit(GenerateRequest {
             request_id: None,
             queued_at_unix_s: None,
+            trace: Default::default(),
             prompt_tokens,
             params: SamplingParams::default(),
             max_tokens,

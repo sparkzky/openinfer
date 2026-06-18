@@ -325,6 +325,7 @@ fn submit(
         .submit(openinfer_core::engine::GenerateRequest {
             request_id: Some(label.clone()),
             queued_at_unix_s: None,
+            trace: Default::default(),
             prompt_tokens: prompt.to_vec(),
             params: SamplingParams {
                 temperature: 0.0,

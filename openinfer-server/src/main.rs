@@ -10,6 +10,7 @@ use openinfer::vllm_frontend::LoraModule;
 use openinfer_core::engine::{EngineHandle, EngineLoadOptions, EpBackend};
 #[cfg(feature = "kimi-k2")]
 use openinfer_core::parallel::ParallelConfig;
+use openinfer_core::request_trace::RequestTraceConfig;
 #[cfg(feature = "qwen3-4b")]
 use openinfer_qwen3_4b::{Qwen3LoraOptions, Qwen3OffloadOptions};
 
@@ -43,6 +44,11 @@ struct Args {
     /// Enable Qwen3 LoRA serving mode.
     #[arg(long, default_value_t = false)]
     enable_lora: bool,
+
+    /// Emit per-request `openinfer_http_trace` JSON summaries for benchmark
+    /// attribution. Disabled by default to keep normal serving overhead low.
+    #[arg(long, default_value_t = false)]
+    request_tracing: bool,
 
     /// LoRA modules to load at startup. Accepts vLLM-style `name=path`, JSON
     /// object, or JSON list object entries with `name` and `path`.
@@ -180,6 +186,9 @@ async fn main() -> anyhow::Result<()> {
     let served_model_name = args.served_model_name.clone();
     let lora_modules = args.lora_modules.clone();
     let enable_lora = args.enable_lora;
+    let trace_config = RequestTraceConfig {
+        enabled: args.request_tracing,
+    };
     let port = args.port;
     let engine_load = tokio::task::spawn_blocking(move || -> anyhow::Result<EngineHandle> {
         load_engine(&args, model_type, effective_cuda_graph)
@@ -194,7 +203,7 @@ async fn main() -> anyhow::Result<()> {
         info!("Engine loaded: elapsed_ms={}", start.elapsed().as_millis());
         let max_model_len =
             openinfer::vllm_frontend::load_max_model_len(&model_path).unwrap_or(4096);
-        openinfer::vllm_frontend::serve_model_with_lora_routes(
+        openinfer::vllm_frontend::serve_model_with_lora_routes_and_trace_config(
             handle,
             model_path.to_string_lossy().into_owned(),
             served_model_name.into_iter().collect(),
@@ -202,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             max_model_len,
             openinfer::vllm_frontend::shutdown_token_from_ctrl_c(),
+            trace_config,
         )
         .await
     } else {
@@ -220,12 +230,13 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::Ok(handle)
             }
         };
-        openinfer::vllm_frontend::serve(
+        openinfer::vllm_frontend::serve_with_trace_config(
             engine,
             &model_path,
             served_model_name.as_deref(),
             port,
             shutdown,
+            trace_config,
         )
         .await
     }

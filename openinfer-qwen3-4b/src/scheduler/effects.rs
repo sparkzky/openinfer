@@ -2,6 +2,7 @@ use tokio::sync::mpsc;
 
 use crate::executor::RequestId;
 use openinfer_core::engine::{FinishReason, TokenLogprob};
+use openinfer_core::request_trace::{RequestTrace, RequestTraceFields, RequestTraceTerminal};
 
 use super::{ActiveRequestState, PendingRequest, TokenEvent};
 
@@ -26,6 +27,7 @@ pub(super) struct ScheduledEffect {
 pub(super) enum PendingEffect {
     Finish {
         request_id: RequestId,
+        trace: RequestTrace,
         token_tx: mpsc::UnboundedSender<TokenEvent>,
         finish_reason: FinishReason,
         prompt_tokens: usize,
@@ -33,6 +35,7 @@ pub(super) enum PendingEffect {
     },
     EmitAndFinish {
         request_id: RequestId,
+        trace: RequestTrace,
         token_tx: mpsc::UnboundedSender<TokenEvent>,
         token: u32,
         logprob: Option<TokenLogprob>,
@@ -130,6 +133,11 @@ pub(super) fn apply_effects(
                     prompt_tokens: req.prompt_len,
                     completion_tokens,
                 });
+                req.trace.finish(RequestTraceTerminal {
+                    finish_reason: finish_reason_label(finish_reason),
+                    prompt_tokens: req.prompt_len,
+                    completion_tokens,
+                });
                 let _ = executor.drop_request(request_id);
                 to_retire.push(index);
             }
@@ -151,6 +159,11 @@ pub(super) fn apply_effects(
                 {
                     let _ = req.token_tx.send(TokenEvent::Finished {
                         finish_reason,
+                        prompt_tokens: req.prompt_len,
+                        completion_tokens,
+                    });
+                    req.trace.finish(RequestTraceTerminal {
+                        finish_reason: finish_reason_label(finish_reason),
                         prompt_tokens: req.prompt_len,
                         completion_tokens,
                     });
@@ -204,6 +217,7 @@ pub(super) fn apply_effects(
             }
             PendingEffect::Finish {
                 request_id,
+                trace,
                 token_tx,
                 finish_reason,
                 prompt_tokens,
@@ -214,10 +228,16 @@ pub(super) fn apply_effects(
                     prompt_tokens,
                     completion_tokens,
                 });
+                trace.finish(RequestTraceTerminal {
+                    finish_reason: finish_reason_label(finish_reason),
+                    prompt_tokens,
+                    completion_tokens,
+                });
                 let _ = executor.drop_request(request_id);
             }
             PendingEffect::EmitAndFinish {
                 request_id,
+                trace,
                 token_tx,
                 token,
                 logprob,
@@ -225,12 +245,18 @@ pub(super) fn apply_effects(
                 prompt_tokens,
                 completion_tokens,
             } => {
+                trace.record("scheduler.first_token", RequestTraceFields::default());
                 if token_tx
                     .send(TokenEvent::Token { id: token, logprob })
                     .is_ok()
                 {
                     let _ = token_tx.send(TokenEvent::Finished {
                         finish_reason,
+                        prompt_tokens,
+                        completion_tokens,
+                    });
+                    trace.finish(RequestTraceTerminal {
+                        finish_reason: finish_reason_label(finish_reason),
                         prompt_tokens,
                         completion_tokens,
                     });
@@ -242,6 +268,9 @@ pub(super) fn apply_effects(
                 first_token,
                 logprob,
             } => {
+                state
+                    .trace
+                    .record("scheduler.first_token", RequestTraceFields::default());
                 if state
                     .token_tx
                     .send(TokenEvent::Token {
@@ -258,4 +287,13 @@ pub(super) fn apply_effects(
         }
     }
     prefilling.splice(0..0, continued);
+}
+
+fn finish_reason_label(reason: FinishReason) -> String {
+    match reason {
+        FinishReason::Length => "length",
+        FinishReason::Stop => "stop",
+        FinishReason::Error => "error",
+    }
+    .to_string()
 }

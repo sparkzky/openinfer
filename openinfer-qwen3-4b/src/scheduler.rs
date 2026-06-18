@@ -23,6 +23,7 @@ use crate::{Qwen3LoraOptions, Qwen3OffloadOptions};
 use openinfer_core::engine::{
     EngineCommand, EngineControlRequest, EngineHandle, GenerateRequest, KvCapacity, TokenEvent,
 };
+use openinfer_core::request_trace::{RequestTrace, RequestTraceTerminal};
 use openinfer_core::sampler::SamplingParams;
 
 use self::effects::apply_effects;
@@ -35,6 +36,7 @@ use self::resolve::resolve_step;
 pub(super) struct ActiveRequestState {
     pub(super) request_id: RequestId,
     pub(super) lora_adapter: Option<String>,
+    pub(super) trace: RequestTrace,
     pub(super) token_tx: mpsc::UnboundedSender<TokenEvent>,
     pub(super) last_token: u32,
     pub(super) generated_count: usize,
@@ -48,6 +50,7 @@ pub(super) struct ActiveRequestState {
 pub(super) struct PendingRequest {
     pub(super) request_id: RequestId,
     pub(super) lora_adapter: Option<String>,
+    pub(super) trace: RequestTrace,
     pub(super) prompt_tokens: Vec<u32>,
     pub(super) params: SamplingParams,
     pub(super) max_tokens: usize,
@@ -76,6 +79,7 @@ impl PendingRequest {
         Self {
             request_id,
             lora_adapter: req.lora_adapter,
+            trace: req.trace,
             prompt_tokens: req.prompt_tokens,
             params: req.params,
             max_tokens: req.max_tokens,
@@ -921,12 +925,22 @@ fn send_rejection(req: &PendingRequest, reason: RejectReason) {
         prompt_tokens: req.prompt_tokens.len(),
         completion_tokens: 0,
     });
+    req.trace.finish(RequestTraceTerminal {
+        finish_reason: "error".to_string(),
+        prompt_tokens: req.prompt_tokens.len(),
+        completion_tokens: 0,
+    });
 }
 
 fn send_unknown_lora_rejection(req: &PendingRequest) {
     let adapter = req.lora_adapter.as_deref().unwrap_or("<missing>");
     let _ = req.token_tx.send(TokenEvent::Rejected {
         message: format!("LoRA adapter is not loaded: {adapter}"),
+        prompt_tokens: req.prompt_tokens.len(),
+        completion_tokens: 0,
+    });
+    req.trace.finish(RequestTraceTerminal {
+        finish_reason: "error".to_string(),
         prompt_tokens: req.prompt_tokens.len(),
         completion_tokens: 0,
     });
@@ -1349,6 +1363,7 @@ mod tests {
         let after_prefill = ActiveRequestState {
             request_id: RequestId(8),
             lora_adapter: None,
+            trace: RequestTrace::disabled(),
             token_tx,
             last_token: 100,
             generated_count: 1,
@@ -1365,6 +1380,7 @@ mod tests {
         let after_one_decode = ActiveRequestState {
             request_id: RequestId(9),
             lora_adapter: None,
+            trace: RequestTrace::disabled(),
             token_tx,
             last_token: 200,
             generated_count: 2,
@@ -1387,6 +1403,7 @@ mod tests {
         let active = [ActiveRequestState {
             request_id: RequestId(0),
             lora_adapter: None,
+            trace: RequestTrace::disabled(),
             token_tx,
             last_token: 1,
             generated_count: 1, // current tokens = prompt_len (16) -> 1 block
@@ -1483,6 +1500,7 @@ mod tests {
             active.push(ActiveRequestState {
                 request_id: RequestId(id),
                 lora_adapter: None,
+                trace: RequestTrace::disabled(),
                 token_tx,
                 last_token: 1,
                 generated_count: 1,
@@ -1911,6 +1929,7 @@ mod tests {
         PendingRequest {
             request_id: RequestId::new(request_id),
             lora_adapter: None,
+            trace: RequestTrace::disabled(),
             prompt_tokens: vec![1; 32],
             params: SamplingParams::default(),
             max_tokens: 1,
@@ -1956,6 +1975,7 @@ mod tests {
             GenerateRequest {
                 request_id: None,
                 queued_at_unix_s: None,
+                trace: openinfer_core::request_trace::RequestTrace::disabled(),
                 prompt_tokens: vec![1; prompt_len],
                 params: SamplingParams::default(),
                 max_tokens,
@@ -2273,6 +2293,7 @@ mod tests {
             active.push(ActiveRequestState {
                 request_id,
                 lora_adapter: None,
+                trace: RequestTrace::disabled(),
                 token_tx,
                 last_token: 100,
                 generated_count: 1,
