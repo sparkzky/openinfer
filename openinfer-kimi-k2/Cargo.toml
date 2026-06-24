@@ -37,10 +37,38 @@ kernel-report = [
     "kernel-call-trace",
 ]
 
+[dev-dependencies]
+openinfer-vllm-support = { workspace = true }
+vllm-text = { workspace = true }
+
 [[test]]
 name = "vllm_golden_gate"
 path = "tests/vllm_golden_gate.rs"
 required-features = ["kimi-k2"]
+
+# Serving-contract integration tests ported from openinfer-qwen3-4b (#222).
+# No `required-features`: the test bodies call `start_engine`, which is defined
+# for both feature configs (feature-off stub bails), so they type-check and
+# skip cleanly without the kimi-k2 runtime built.
+[[test]]
+name = "sampling_behavior"
+path = "tests/sampling_behavior.rs"
+
+[[test]]
+name = "context_window"
+path = "tests/context_window.rs"
+
+[[test]]
+name = "context_window_in_window"
+path = "tests/context_window_in_window.rs"
+
+[[test]]
+name = "scheduler_robustness"
+path = "tests/scheduler_robustness.rs"
+
+[[test]]
+name = "cached_tokens_usage"
+path = "tests/cached_tokens_usage.rs"
 
 [[bin]]
 name = "kimi_kernel_report"
