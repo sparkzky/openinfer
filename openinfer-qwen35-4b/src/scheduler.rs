@@ -23,8 +23,8 @@ use crate::logprobs::snapshot_requested_logprobs;
 use crate::recurrent_state::RecurrentState;
 use crate::weights::Qwen35Model;
 use openinfer_core::engine::{
-    EngineHandle as SchedulerHandle, FinishReason, GenerateRequest as SchedulerRequest, TokenEvent,
-    TokenLogprob, TokenSink,
+    EngineHandle as SchedulerHandle, FinishReason, GenerateRequest as SchedulerRequest, KvCapacity,
+    TokenEvent, TokenLogprob, TokenSink,
 };
 use openinfer_core::kv_pool::KvState;
 use openinfer_core::sampler::SamplingParams;
@@ -72,6 +72,10 @@ pub fn start_with_capacity(
         model.kv_pool().capacity_pages().saturating_sub(1),
         model.kv_pool().layout().page_size,
     );
+    let kv_capacity = KvCapacity {
+        total_blocks: model.kv_pool().capacity_pages().saturating_sub(1),
+        block_size: model.kv_pool().layout().page_size,
+    };
     let graph_state = model.create_batch_decode_graph_state_with_capacity(max_batch)?;
 
     let (submit_tx, submit_rx) = mpsc::unbounded_channel();
@@ -97,7 +101,11 @@ pub fn start_with_capacity(
         let _ = join_handle.join();
         return Err(err);
     }
-    Ok(SchedulerHandle::new_with_join_handle(submit_tx, join_handle).with_servable_len(servable))
+    Ok(
+        SchedulerHandle::new_with_join_handle(submit_tx, join_handle)
+            .with_servable_len(servable)
+            .with_kv_capacity(kv_capacity),
+    )
 }
 
 fn servable_len(max_context: usize, max_pages: usize, page_size: usize) -> u32 {

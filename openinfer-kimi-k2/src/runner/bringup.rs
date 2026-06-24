@@ -11,7 +11,7 @@ use bytesize::ByteSize;
 use crossbeam_channel::bounded;
 use log::{debug, info};
 use openinfer_core::{
-    engine::{EngineHandle, EngineLoadOptions, EpBackend, GenerateRequest},
+    engine::{EngineHandle, EngineLoadOptions, EpBackend, GenerateRequest, KvCapacity},
     parallel::ParallelConfig,
 };
 use tokio::sync::mpsc;
@@ -144,6 +144,10 @@ fn start_engine_tp8_dp1(
     let stop_token_ids = load_stop_token_ids(model_path)?;
     let executor = build_tp8_dp1_executor(&config)?;
     let pool = BlockPool::new(KIMI_KV_PAGE_SIZE, config.kv_pool_pages)?;
+    let kv_capacity = KvCapacity {
+        total_blocks: pool.available_blocks(),
+        block_size: pool.block_size(),
+    };
 
     let (submit_tx, submit_rx) = mpsc::unbounded_channel::<GenerateRequest>();
     let (init_tx, init_rx) = bounded::<Result<()>>(1);
@@ -165,10 +169,10 @@ fn start_engine_tp8_dp1(
     init_rx
         .recv()
         .map_err(|err| anyhow::anyhow!("Kimi-K2 scheduler init channel closed: {err}"))??;
-    Ok(EngineHandle::new_with_join_handle(
-        submit_tx,
-        scheduler_handle,
-    ))
+    Ok(
+        EngineHandle::new_with_join_handle(submit_tx, scheduler_handle)
+            .with_kv_capacity(kv_capacity),
+    )
 }
 
 fn start_engine_tp1_dp8(
@@ -194,6 +198,10 @@ fn start_engine_tp1_dp8(
     let pools = (0..dp_world)
         .map(|_| BlockPool::new(KIMI_KV_PAGE_SIZE, config.kv_pool_pages))
         .collect::<Result<Vec<_>>>()?;
+    let kv_capacity = KvCapacity {
+        total_blocks: pools[0].available_blocks(),
+        block_size: pools[0].block_size(),
+    };
     let coordinator = DpCoordinator::new(executors, stop_token_ids, options.seed, pools);
     let lb = DpLoadBalancer::new(dp_world);
 
@@ -211,7 +219,7 @@ fn start_engine_tp1_dp8(
         .map_err(|err| anyhow::anyhow!("Kimi-K2 DP coordinator init failed: {err}"))??;
 
     info!("TP1 DP{dp_world} coordinated engine started");
-    Ok(EngineHandle::new_with_join_handle(submit_tx, coord_handle))
+    Ok(EngineHandle::new_with_join_handle(submit_tx, coord_handle).with_kv_capacity(kv_capacity))
 }
 
 fn build_tp8_dp1_executor(config: &KimiK2RunnerConfig) -> Result<Box<dyn ForwardExecutor + Send>> {

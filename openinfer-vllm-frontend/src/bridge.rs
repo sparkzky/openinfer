@@ -24,7 +24,8 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, ZmqMessage};
 
 use openinfer_engine::engine::{
-    EngineHandle, GenerateRequest, RequestTag, TokenEvent, TokenSink, TokenStreamReceiver,
+    EngineHandle, GenerateRequest, KvCapacity, RequestTag, TokenEvent, TokenSink,
+    TokenStreamReceiver,
 };
 
 use crate::wire::{
@@ -57,17 +58,23 @@ impl LocalEngineBridge {
                 self.input_address
             )
         })?;
-
+        // Plumb the scheduler's real paged-KV capacity (block size + token
+        // count) into the handshake instead of the pre-#401 placeholders. See
+        // `ready_kv_fields` for the field-by-field rationale.
+        let (block_size, num_gpu_blocks, kv_cache_size_tokens) =
+            ready_kv_fields(self.handle.kv_capacity());
         let ready = EngineCoreReadyResponse {
             max_model_len: self.max_model_len as u64,
-            num_gpu_blocks: 0,
-            // TODO(#401): report the real paged-KV block size and capacity from the
-            // openinfer scheduler once the vLLM frontend consumes ready_response KV fields.
-            block_size: 16,
+            num_gpu_blocks,
+            block_size,
             dp_stats_address: None,
             dtype: ModelDtype::BFloat16,
             vllm_version: "openinfer-local-bridge".to_string(),
-            kv_cache_size_tokens: None,
+            kv_cache_size_tokens,
+            // openinfer's scheduler exposes block counts, not the per-request
+            // memory profile / layer-group structure vLLM uses to compute
+            // group-aware max concurrency, so we leave it unset rather than
+            // fabricate a number admission and `vllm:cache_config_info` trust.
             kv_cache_max_concurrency: None,
         };
         input
@@ -243,6 +250,40 @@ impl LocalEngineBridge {
 
         streams.insert(tag, RequestStreamState::new(cancelled));
         Ok(())
+    }
+}
+
+/// Map the scheduler-reported paged-KV capacity into the three capacity fields
+/// the vLLM ready handshake carries (`block_size`, `num_gpu_blocks`,
+/// `kv_cache_size_tokens`), so upstream group-aware KV reporting and the
+/// `vllm:cache_config_info` Prometheus labels reflect the real pool.
+///
+/// When the engine did not report capacity (a bare `EngineHandle::new`, i.e. a
+/// stub/test — the real model schedulers always call `.with_kv_capacity(...)`),
+/// fall back to the pre-#401 placeholders so the handshake still completes; the
+/// vLLM frontend does not yet gate on these fields. `block_size` is a
+/// non-optional `u64`, so "unknown" cannot be sent — the `warn!` keeps the
+/// silence visible instead of hiding behind a plausible-looking `16`.
+///
+/// Returns `(block_size, num_gpu_blocks, kv_cache_size_tokens)`.
+/// `kv_cache_max_concurrency` is intentionally **not** derived here: openinfer's
+/// scheduler exposes block counts, not the per-request memory profile /
+/// layer-group structure vLLM uses to compute group-aware max concurrency, so
+/// any value would be a guess that misleads admission and metrics.
+fn ready_kv_fields(kv_capacity: Option<KvCapacity>) -> (u64, u64, Option<u64>) {
+    match kv_capacity {
+        Some(cap) => (
+            cap.block_size as u64,
+            cap.total_blocks as u64,
+            Some(cap.total_tokens() as u64),
+        ),
+        None => {
+            warn!(
+                "engine reported no KV capacity; ready_response falls back to \
+                 placeholder block_size=16, num_gpu_blocks=0"
+            );
+            (16, 0, None)
+        }
     }
 }
 

@@ -7,7 +7,7 @@
 //! abort dropping late tokens. The full HTTP→ZMQ→bridge happy path is covered
 //! end to end by `openinfer-sim`'s `frontend_e2e` integration test (the CI gate).
 
-use openinfer_engine::engine::{FinishReason, TokenLogprob};
+use openinfer_engine::engine::{FinishReason, KvCapacity, TokenLogprob};
 
 use super::*;
 
@@ -392,4 +392,33 @@ fn rejected_request_is_reported_as_error() {
         !d.streams.contains_key("req-1"),
         "finished stream is removed"
     );
+}
+
+/// The scheduler-reported paged-KV capacity must flow straight into the
+/// ready-response fields: `block_size` per block, `num_gpu_blocks` = total
+/// blocks, and `kv_cache_size_tokens` = their product (`total_tokens`). No
+/// rounding or clamping — `KvCapacity::total_tokens` already saturates.
+#[test]
+fn ready_kv_fields_reports_scheduler_capacity() {
+    let cap = KvCapacity {
+        total_blocks: 100,
+        block_size: 32,
+    };
+    let (block_size, num_gpu_blocks, kv_cache_size_tokens) = ready_kv_fields(Some(cap));
+    assert_eq!(block_size, 32);
+    assert_eq!(num_gpu_blocks, 100);
+    assert_eq!(kv_cache_size_tokens, Some(3200));
+}
+
+/// A handle that did not call `.with_kv_capacity(...)` (a stub/test engine)
+/// must still produce a sendable ready response: fall back to the pre-#401
+/// placeholders (`block_size=16`, `num_gpu_blocks=0`) and leave the token
+/// capacity unset. The real model schedulers always report capacity, so this
+/// branch only fires outside the serving path.
+#[test]
+fn ready_kv_fields_falls_back_when_engine_silent() {
+    let (block_size, num_gpu_blocks, kv_cache_size_tokens) = ready_kv_fields(None);
+    assert_eq!(block_size, 16);
+    assert_eq!(num_gpu_blocks, 0);
+    assert_eq!(kv_cache_size_tokens, None);
 }
