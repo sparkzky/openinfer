@@ -67,7 +67,9 @@ pub(in crate::runner) fn preflight_prefill_candidate(
         return Some(req);
     };
     // Scheduled first, terminal event last — consumers stop at the terminal.
-    send_scheduled(&req);
+    // Unschedulable requests never reach the prefix match, so cached_tokens=0
+    // is honest; the timestamp is stamped at admission (== this reject point).
+    send_scheduled(&req, unix_now_s(), 0);
     match verdict {
         UnschedulableVerdict::Finish => {
             let _ = req.token_tx.send(TokenEvent::Finished {
@@ -87,16 +89,23 @@ pub(in crate::runner) fn preflight_prefill_candidate(
     None
 }
 
-pub(in crate::runner) fn send_scheduled(req: &GenerateRequest) {
-    let scheduled_at = unix_now_s();
+/// Emit `TokenEvent::Scheduled` for a request.
+///
+/// `scheduled_at_unix_s` is stamped by the caller at admission (batch
+/// formation), not here — callers that defer the send until the prefix match
+/// lands keep queue-time metrics honest (the gap is the in-memory match, not
+/// GPU prefill). `cached_tokens` is the prefix-cache hit count from
+/// `match_and_add_prefix`; admission/rejection paths that run no match pass 0.
+pub(in crate::runner) fn send_scheduled(
+    req: &GenerateRequest,
+    scheduled_at_unix_s: f64,
+    cached_tokens: usize,
+) {
     let _ = req.token_tx.send(TokenEvent::Scheduled {
-        queued_at_unix_s: req.queued_at_unix_s.unwrap_or(scheduled_at),
-        scheduled_at_unix_s: scheduled_at,
+        queued_at_unix_s: req.queued_at_unix_s.unwrap_or(scheduled_at_unix_s),
+        scheduled_at_unix_s,
         prompt_tokens: req.prompt_tokens.len(),
-        // Emitted at admission, before the KV prefix match runs — the real
-        // hit count is not known yet (kimi prefix-cache usage reporting is a
-        // follow-up).
-        cached_tokens: 0,
+        cached_tokens,
     });
 }
 

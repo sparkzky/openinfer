@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crossbeam_channel::{Receiver, Sender, bounded};
 use log::error;
-use openinfer_core::engine::{FinishReason, GenerateRequest, TokenEvent, TokenSink};
+use openinfer_core::engine::{FinishReason, GenerateRequest, TokenEvent, TokenSink, unix_now_s};
 use openinfer_kv_cache::{BlockPool, RequestKv};
 use rand::rngs::StdRng;
 use tokio::sync::mpsc;
@@ -306,7 +306,9 @@ impl DpCoordinator {
                 self.pools[0].max_request_blocks(),
                 Some(DEEPEP_MAX_DISPATCH_TOKENS),
             ) {
-                send_scheduled(&req);
+                // Rejected before prefill: no prefix match, cached_tokens=0
+                // honest; stamp at this reject point.
+                send_scheduled(&req, unix_now_s(), 0);
                 let _ = req.token_tx.send(TokenEvent::Rejected {
                     message,
                     prompt_tokens: req.prompt_tokens.len(),
@@ -341,7 +343,8 @@ impl DpCoordinator {
                         "Kimi-K2 admission KV block accounting violated full-lifetime reservation: {err}"
                     );
                     error!("{message}");
-                    send_scheduled(&req);
+                    // Failed before any prefix match: cached_tokens=0 honest.
+                    send_scheduled(&req, unix_now_s(), 0);
                     let _ = req.token_tx.send(TokenEvent::Error {
                         message,
                         prompt_tokens: req.prompt_tokens.len(),
@@ -350,7 +353,9 @@ impl DpCoordinator {
                     continue;
                 }
                 round_reserved[rank] += blocks_needed.saturating_sub(1);
-                send_scheduled(&req);
+                // 1-token prompts run no prefix match (decode-admission
+                // path), so cached_tokens=0 is honest; stamp at admission.
+                send_scheduled(&req, unix_now_s(), 0);
                 decode_admissions[rank].push(DecodeAdmission { slot, req, kv });
                 continue;
             }
@@ -420,7 +425,10 @@ impl DpCoordinator {
         prefill_slots: &[usize],
         req: GenerateRequest,
     ) {
-        send_scheduled(&req);
+        // Stamp the scheduled timestamp at admission (batch formation). The
+        // send is deferred until the prefix match lands so cached_tokens
+        // carries the real hit count (#351).
+        let scheduled_at_unix_s = unix_now_s();
 
         let mut kv =
             self.pools[dp_rank].new_request(req.prompt_tokens.clone(), req.max_tokens, None);
@@ -429,6 +437,10 @@ impl DpCoordinator {
             Err(err) => {
                 let message = format!("Kimi-K2 prefix cache matching failed: {err:#}");
                 error!("{message}");
+                // No tokens were cached (the match failed): cached_tokens=0
+                // is honest. Emit Scheduled (stamped above) to keep the
+                // once-per-request contract before the terminal Error.
+                send_scheduled(&req, scheduled_at_unix_s, 0);
                 let _ = req.token_tx.send(TokenEvent::Error {
                     message,
                     prompt_tokens: req.prompt_tokens.len(),
@@ -437,6 +449,11 @@ impl DpCoordinator {
                 return;
             }
         };
+        // Match succeeded: emit Scheduled with the real prefix-cache hit
+        // count (#351), stamped at admission. Sent before schedule_prefill so
+        // its (unreachable) failure path also retains the once-per-request
+        // contract.
+        send_scheduled(&req, scheduled_at_unix_s, cached_tokens);
         let suffix_len = req.prompt_tokens.len() - cached_tokens;
         if let Err(err) = kv.schedule_prefill(suffix_len, &self.pools[dp_rank]) {
             let message = format!(

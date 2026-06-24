@@ -12,7 +12,7 @@ use crate::runner::worker::{KimiKvStepPages, KimiRowOptions};
 use anyhow::{Context, Result};
 use lifecycle::{preflight_prefill_candidate, send_scheduled, validate_kv_capacity};
 use log::error;
-use openinfer_core::engine::{FinishReason, GenerateRequest, TokenEvent, TokenSink};
+use openinfer_core::engine::{FinishReason, GenerateRequest, TokenEvent, TokenSink, unix_now_s};
 use openinfer_kv_cache::{BlockPool, RequestKv};
 use tokio::sync::mpsc;
 
@@ -137,7 +137,11 @@ impl KimiK2Scheduler {
     }
 
     fn handle_request_batch(&mut self, reqs: Vec<GenerateRequest>) -> Vec<GenerateRequest> {
-        let mut prefill_reqs = Vec::with_capacity(reqs.len());
+        // Each admitted request carries its admission timestamp so the
+        // `Scheduled` send can be deferred until the prefix match lands (#351) —
+        // the timestamp stays at batch formation while cached_tokens is filled
+        // with the real hit count later.
+        let mut prefill_reqs: Vec<(GenerateRequest, f64)> = Vec::with_capacity(reqs.len());
         let mut deferred = Vec::new();
         // Full-lifetime reservation (#239, the qwen3 #85 pattern): a request
         // is only admitted when the pool can hold its prompt plus every
@@ -153,7 +157,9 @@ impl KimiK2Scheduler {
             // global distribution (#226). Rejecting here keeps one bad
             // request from failing the whole decode batch in the executor.
             if !req.params.is_greedy() {
-                send_scheduled(&req);
+                // Rejected before any prefill: no prefix match runs, so
+                // cached_tokens=0 is honest; stamp at this reject point.
+                send_scheduled(&req, unix_now_s(), 0);
                 let _ = req.token_tx.send(TokenEvent::Rejected {
                     message: "Kimi TP8 path does not support sampling yet: use \
                               TP1/DP8 or temperature=0 (#237, #226)"
@@ -169,7 +175,9 @@ impl KimiK2Scheduler {
                 self.pool.max_request_blocks(),
                 None,
             ) {
-                send_scheduled(&req);
+                // Rejected before any prefill: no prefix match runs, so
+                // cached_tokens=0 is honest; stamp at this reject point.
+                send_scheduled(&req, unix_now_s(), 0);
                 let _ = req.token_tx.send(TokenEvent::Rejected {
                     message,
                     prompt_tokens: req.prompt_tokens.len(),
@@ -183,8 +191,11 @@ impl KimiK2Scheduler {
                 continue;
             }
             budget -= blocks_needed;
-            send_scheduled(&req);
-            prefill_reqs.push(req);
+            // Stamp the scheduled timestamp at admission (batch formation).
+            // The send is deferred into prefill_request / decode_admission
+            // so cached_tokens reflects the real prefix-cache hit (#351).
+            let scheduled_at_unix_s = unix_now_s();
+            prefill_reqs.push((req, scheduled_at_unix_s));
         }
         if prefill_reqs.is_empty() {
             return deferred;
@@ -198,7 +209,12 @@ impl KimiK2Scheduler {
                 self.executor.worker_count()
             );
             error!("{message}");
-            for req in prefill_reqs {
+            for (req, scheduled_at_unix_s) in prefill_reqs {
+                // The decode arena alloc failed before any prefill ran, so no
+                // prefix match happened: cached_tokens=0 is honest. Emit
+                // Scheduled (stamped at admission) before the terminal Error
+                // to keep the once-per-request contract.
+                send_scheduled(&req, scheduled_at_unix_s, 0);
                 let _ = req.token_tx.send(TokenEvent::Error {
                     message: message.clone(),
                     prompt_tokens: req.prompt_tokens.len(),
@@ -209,9 +225,9 @@ impl KimiK2Scheduler {
         }
         let mut active = Vec::with_capacity(prefill_reqs.len());
         let mut decode_admissions = Vec::with_capacity(KIMI_DECODE_ADMISSION_MICROBATCH);
-        for (slot, req) in prefill_reqs.into_iter().enumerate() {
+        for (slot, (req, scheduled_at_unix_s)) in prefill_reqs.into_iter().enumerate() {
             if req.prompt_tokens.len() == 1 {
-                decode_admissions.push((slot, req));
+                decode_admissions.push((slot, req, scheduled_at_unix_s));
                 if decode_admissions.len() == KIMI_DECODE_ADMISSION_MICROBATCH {
                     self.decode_admission_microbatch(
                         std::mem::take(&mut decode_admissions),
@@ -228,7 +244,9 @@ impl KimiK2Scheduler {
                     &mut active,
                 );
             }
-            if let Some(active_req) = self.prefill_request(req, slot, decode_batch_size) {
+            if let Some(active_req) =
+                self.prefill_request(req, slot, decode_batch_size, scheduled_at_unix_s)
+            {
                 active.push(active_req);
             }
         }
@@ -402,9 +420,16 @@ impl KimiK2Scheduler {
         req: GenerateRequest,
         slot: usize,
         decode_batch_size: usize,
+        scheduled_at_unix_s: f64,
     ) -> Option<ActiveKimiRequest> {
         let completion_tokens = 0usize;
         let (mut kv, cached_tokens) = self.schedule_request_kv(&req)?;
+        // Now that the prefix match has run, emit Scheduled with the real hit
+        // count (#351). The timestamp was stamped at admission. (If
+        // schedule_request_kv failed it already sent Error and returned None
+        // — an unreachable full-lifetime-reservation violation — so Scheduled
+        // is skipped there.)
+        send_scheduled(&req, scheduled_at_unix_s, cached_tokens);
         let suffix_len = req.prompt_tokens.len() - cached_tokens;
         let kv_pages = KimiKvStepPages::single(
             kv.step_page_indices(suffix_len),
@@ -491,18 +516,25 @@ impl KimiK2Scheduler {
 
     fn decode_admission_microbatch(
         &mut self,
-        group: Vec<(usize, GenerateRequest)>,
+        group: Vec<(usize, GenerateRequest, f64)>,
         decode_batch_size: usize,
         active: &mut Vec<ActiveKimiRequest>,
     ) {
         // 1-token prompts run their "prefill" through the decode path; the
         // KV lifecycle is still a prefill of one token. Prefix matching
-        // always leaves ≥1 token uncached, so cached_tokens is 0 here.
+        // always leaves ≥1 token uncached, so cached_tokens is 0 here, but
+        // the real value from match_and_add_prefix is still threaded through
+        // (#351) instead of assumed.
         let mut group_kv = Vec::with_capacity(group.len());
-        for (slot, req) in group {
-            let Some((kv, _cached_tokens)) = self.schedule_request_kv(&req) else {
+        for (slot, req, scheduled_at_unix_s) in group {
+            let Some((kv, cached_tokens)) = self.schedule_request_kv(&req) else {
                 continue;
             };
+            // Emit Scheduled with the real (here always 0) hit count, stamped
+            // at admission. On schedule_request_kv failure (unreachable
+            // invariant violation) the request already got Error and is
+            // skipped, so it receives no Scheduled.
+            send_scheduled(&req, scheduled_at_unix_s, cached_tokens);
             group_kv.push((slot, req, kv));
         }
         if group_kv.is_empty() {
