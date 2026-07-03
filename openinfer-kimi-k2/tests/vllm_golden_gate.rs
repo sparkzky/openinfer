@@ -332,6 +332,7 @@ fn submit(
                 top_k: -1,
                 top_p: 1.0,
                 ignore_eos: true,
+                ..Default::default()
             },
             max_tokens,
             lora_adapter: None,

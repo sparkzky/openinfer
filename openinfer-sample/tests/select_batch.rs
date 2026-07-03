@@ -37,15 +37,16 @@ fn greedy() -> SamplingParams {
         top_k: -1,
         top_p: 1.0,
         ignore_eos: false,
+        ..Default::default()
     }
 }
-
 fn sampling(temperature: f32, top_k: i32, top_p: f32) -> SamplingParams {
     SamplingParams {
         temperature,
         top_k,
         top_p,
         ignore_eos: false,
+        ..Default::default()
     }
 }
 

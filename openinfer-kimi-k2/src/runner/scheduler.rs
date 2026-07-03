@@ -822,6 +822,7 @@ mod tests {
             top_k: -1,
             top_p: 0.9,
             ignore_eos: false,
+            ..Default::default()
         };
 
         scheduler.handle_request_batch(vec![sampling_req]);

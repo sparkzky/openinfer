@@ -32,14 +32,17 @@ __global__ void gather_cast_logits_f32_kernel(const __nv_bfloat16* __restrict__ 
 
 }  // namespace
 
-// Batched temperature/top-k/top-p sampling over a bf16 logits arena.
+// Batched temperature/top-k/top-p/min_p sampling over a bf16 logits arena.
 //
-// Three launches for the whole batch: gather+cast (bf16 -> f32), FlashInfer
-// OnlineSoftmax (per-row temperature, vocab-splitting strategy for the
-// small-batch x large-vocab decode regime), then one FlashInfer sampling kernel
-// (Sampling/TopP/TopKTopP depending on the row params). One philox seed per
-// call; rows decorrelate through the philox subsequence (= row index), so the
-// caller must supply a fresh seed per decode step.
+// Launches: gather+cast (bf16 -> f32), FlashInfer OnlineSoftmax (per-row
+// temperature), then one sampling path:
+//  - min_p path (when has_min_p_filter): optional TopP renorm, then
+//    MinPSamplingFromProb. Top-k is NOT applied in this path — min_p already
+//    filters low-probability tokens; combining top-k+min_p would need
+//    TopKRenormProb which this FlashInfer version does not expose.
+//  - fast path (no min_p): fused TopKTopP / TopP / plain sampling.
+// One philox seed per call; rows decorrelate through the philox subsequence
+// (= row index), so the caller must supply a fresh seed per decode step.
 //
 // top_k_arr entries must be pre-clamped to [1, vocab_size] when top-k is used;
 // temperature_arr entries must be > 0 — greedy rows belong on the argmax path,
@@ -47,9 +50,10 @@ __global__ void gather_cast_logits_f32_kernel(const __nv_bfloat16* __restrict__ 
 extern "C" int gpu_sample_batch_flashinfer_cuda(
     const __nv_bfloat16* logits, const int* row_indices, float* probs_scratch,
     const float* temperature_arr, const int* top_k_arr, const float* top_p_arr,
-    uint8_t* valid_scratch, int* output, void* softmax_workspace,
-    size_t softmax_workspace_bytes, int n_rows, int vocab_size, int has_top_k_filter,
-    int has_top_p_filter, uint64_t seed, uint64_t offset, cudaStream_t stream) {
+    const float* min_p_arr, uint8_t* valid_scratch, int* output,
+    void* softmax_workspace, size_t softmax_workspace_bytes, int n_rows,
+    int vocab_size, int has_top_k_filter, int has_top_p_filter,
+    int has_min_p_filter, uint64_t seed, uint64_t offset, cudaStream_t stream) {
   dim3 gather_grid(
       (vocab_size + GATHER_CAST_BLOCK * GATHER_CAST_ELEMS_PER_THREAD - 1) /
           (GATHER_CAST_BLOCK * GATHER_CAST_ELEMS_PER_THREAD),
@@ -72,7 +76,25 @@ extern "C" int gpu_sample_batch_flashinfer_cuda(
   }
 
   bool* valid = reinterpret_cast<bool*>(valid_scratch);
-  if (has_top_k_filter) {
+
+  if (has_min_p_filter) {
+    // Composition: TopP renorm (if any) → MinPSampling. Top-k is dropped in
+    // this path (see function doc). TopPRenormProb is in-place safe when
+    // probs_scratch == renorm output.
+    if (has_top_p_filter) {
+      err = flashinfer::sampling::TopPRenormProb<float>(
+          probs_scratch, probs_scratch, const_cast<float*>(top_p_arr), n_rows,
+          /*top_p_val=*/1.0f, vocab_size, stream);
+      if (err != cudaSuccess) {
+        return static_cast<int>(err);
+      }
+    }
+    err = flashinfer::sampling::MinPSamplingFromProb<float, int>(
+        probs_scratch, const_cast<float*>(min_p_arr), output, valid,
+        /*indices=*/nullptr, n_rows, /*min_p_val=*/0.0f, vocab_size,
+        /*deterministic=*/true, /*seed_arr=*/nullptr, seed, /*offset_arr=*/nullptr, offset,
+        stream);
+  } else if (has_top_k_filter) {
     err = flashinfer::sampling::TopKTopPSamplingFromProb<float, int>(
         probs_scratch, const_cast<int*>(top_k_arr), const_cast<float*>(top_p_arr), output, valid,
         /*indices=*/nullptr, n_rows, /*top_k_val=*/0, /*top_p_val=*/0.0f, vocab_size,

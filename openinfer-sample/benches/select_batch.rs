@@ -24,6 +24,7 @@ fn p(temperature: f32, top_k: i32, top_p: f32) -> SamplingParams {
         top_k,
         top_p,
         ignore_eos: false,
+        ..Default::default()
     }
 }
 

@@ -8,7 +8,9 @@ use crate::tensor::{DeviceContext, DeviceVec, HiddenStates, HiddenStatesRef};
 ///
 /// `temperature` must be > 0 and `top_p` in (0, 1] — greedy rows
 /// (`temperature <= 0` or `top_k == 1`) belong on the argmax path.
-/// `top_k <= 0` means disabled.
+/// `top_k <= 0` means disabled. `min_p == 0.0` means disabled (the fused
+/// TopKTopP fast path); a non-zero `min_p` routes through the separate
+/// renorm+min_p sampling path.
 #[derive(Clone, Copy, Debug)]
 pub struct BatchSamplingRow {
     /// Row index into the logits arena.
@@ -16,6 +18,7 @@ pub struct BatchSamplingRow {
     pub temperature: f32,
     pub top_k: i32,
     pub top_p: f32,
+    pub min_p: f32,
 }
 
 /// Device buffers for `gpu_sample_batch_into`, sized for `max_rows` x `vocab`.
@@ -25,6 +28,7 @@ pub struct BatchSamplingScratch {
     temperature: CudaSlice<f32>,
     top_k: CudaSlice<i32>,
     top_p: CudaSlice<f32>,
+    min_p: CudaSlice<f32>,
     valid: CudaSlice<u8>,
     out: CudaSlice<i32>,
     softmax_workspace: CudaSlice<u8>,
@@ -52,6 +56,7 @@ impl BatchSamplingScratch {
             temperature: alloc(max_rows)?,
             top_k: ctx.stream.alloc_zeros(max_rows)?,
             top_p: alloc(max_rows)?,
+            min_p: alloc(max_rows)?,
             valid: ctx.stream.alloc_zeros(max_rows)?,
             out: ctx.stream.alloc_zeros(max_rows)?,
             softmax_workspace: ctx.stream.alloc_zeros(softmax_workspace_bytes)?,
@@ -97,8 +102,10 @@ pub fn gpu_sample_batch_into(
     let mut temperature = Vec::with_capacity(n);
     let mut top_k = Vec::with_capacity(n);
     let mut top_p = Vec::with_capacity(n);
+    let mut min_p = Vec::with_capacity(n);
     let mut has_top_k_filter = false;
     let mut has_top_p_filter = false;
+    let mut has_min_p_filter = false;
     for r in rows {
         ensure!(
             r.row < logits.seq_len,
@@ -116,6 +123,11 @@ pub fn gpu_sample_batch_into(
             "batch sampling top_p {} must be in (0, 1]",
             r.top_p
         );
+        ensure!(
+            r.min_p >= 0.0 && r.min_p <= 1.0,
+            "batch sampling min_p {} must be in [0, 1]",
+            r.min_p
+        );
         row_indices.push(i32::try_from(r.row)?);
         temperature.push(r.temperature);
         // FlashInfer reads top_k as u32; "disabled" is any k >= vocab.
@@ -131,6 +143,10 @@ pub fn gpu_sample_batch_into(
             has_top_p_filter = true;
         }
         top_p.push(r.top_p);
+        if r.min_p > 0.0 {
+            has_min_p_filter = true;
+        }
+        min_p.push(r.min_p);
     }
     ctx.stream
         .memcpy_htod(&row_indices, &mut scratch.row_indices)?;
@@ -138,15 +154,17 @@ pub fn gpu_sample_batch_into(
         .memcpy_htod(&temperature, &mut scratch.temperature)?;
     ctx.stream.memcpy_htod(&top_k, &mut scratch.top_k)?;
     ctx.stream.memcpy_htod(&top_p, &mut scratch.top_p)?;
+    ctx.stream.memcpy_htod(&min_p, &mut scratch.min_p)?;
 
     {
         let softmax_workspace_bytes = scratch.softmax_workspace.len();
         let (logits_ptr, _gl) = logits.data.device_ptr(&ctx.stream);
         let (indices_ptr, _gi) = scratch.row_indices.device_ptr(&ctx.stream);
-        let (probs_ptr, _gp) = scratch.probs.device_ptr_mut(&ctx.stream);
         let (temp_ptr, _gt) = scratch.temperature.device_ptr(&ctx.stream);
+        let (probs_ptr, _gp) = scratch.probs.device_ptr_mut(&ctx.stream);
         let (top_k_ptr, _gk) = scratch.top_k.device_ptr(&ctx.stream);
         let (top_p_ptr, _gtp) = scratch.top_p.device_ptr(&ctx.stream);
+        let (min_p_ptr, _gmp) = scratch.min_p.device_ptr(&ctx.stream);
         let (valid_ptr, _gv) = scratch.valid.device_ptr_mut(&ctx.stream);
         let (out_ptr, _go) = scratch.out.device_ptr_mut(&ctx.stream);
         let (ws_ptr, _gw) = scratch.softmax_workspace.device_ptr_mut(&ctx.stream);
@@ -159,6 +177,7 @@ pub fn gpu_sample_batch_into(
                 temp_ptr as *const f32,
                 top_k_ptr as *const i32,
                 top_p_ptr as *const f32,
+                min_p_ptr as *const f32,
                 valid_ptr as *mut u8,
                 out_ptr as *mut i32,
                 ws_ptr as *mut u8,
@@ -167,6 +186,7 @@ pub fn gpu_sample_batch_into(
                 scratch.vocab as i32,
                 i32::from(has_top_k_filter),
                 i32::from(has_top_p_filter),
+                i32::from(has_min_p_filter),
                 seed,
                 0,
                 crate::tensor::active_cu_stream(ctx),

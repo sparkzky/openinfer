@@ -37,7 +37,14 @@ pub(crate) fn to_wire_position_logprobs(
     Some(PositionLogprobs { entries })
 }
 
-pub(crate) fn convert_sampling(params: &EngineCoreSamplingParams) -> SamplingParams {
+/// Convert the wire-layer sampling params into the engine contract.
+///
+/// Returns `Err` (surfaced as a rejected request at the bridge) when the
+/// client set a sampling knob the engine does not yet implement, so the
+/// caller gets an explicit signal instead of the silent fallback that used
+/// to drop every field below `top_p`. Currently rejected: frequency,
+/// presence, and repetition penalties (slice 2, #490).
+pub(crate) fn convert_sampling(params: &EngineCoreSamplingParams) -> Result<SamplingParams> {
     // The vLLM frontend lowers a client `ignore_eos=true` to `_eos_token_id:
     // None`, but `_all_stop_token_ids` always carries the model EOS set (it
     // exists for min_tokens masking, not stop detection). Deriving ignore_eos
@@ -45,16 +52,50 @@ pub(crate) fn convert_sampling(params: &EngineCoreSamplingParams) -> SamplingPar
     // models with a real EOS. Only `_eos_token_id` and the client's explicit
     // `stop_token_ids` express a stop intent.
     let ignore_eos = params.eos_token_id.is_none() && params.stop_token_ids.is_empty();
+
+    // Penalties need a per-request output-token-count pipeline that lands in
+    // slice 2 (#490); reject explicitly instead of silently ignoring.
+    if params.frequency_penalty != 0.0 {
+        bail!("frequency_penalty is not yet supported");
+    }
+    if params.presence_penalty != 0.0 {
+        bail!("presence_penalty is not yet supported");
+    }
+    if params.repetition_penalty != 1.0 {
+        bail!("repetition_penalty is not yet supported");
+    }
+
+    // min_p range: [0, 1]. 0 disables the filter (fast path). Clamp tiny
+    // negatives to 0 rather than rejecting — the wire default is already 0
+    // and a stray -0.0 / subnormal should not be a client-visible error.
+    let min_p = if params.min_p < 0.0 { 0.0 } else { params.min_p };
+    if min_p > 1.0 {
+        bail!("min_p must be in [0, 1], got {min_p}");
+    }
+
+    // Per-request seed: the wire type carries i64; the GPU sampler wants u64.
+    // A negative seed is rejected (philox keys are unsigned).
+    let seed = match params.seed {
+        None => None,
+        Some(s) if s < 0 => bail!("seed must be non-negative, got {s}"),
+        Some(s) => Some(s as u64),
+    };
+
     if params.temperature <= 0.0 {
-        return SamplingParams {
+        return Ok(SamplingParams {
             temperature: 0.0,
             top_k: -1,
             top_p: 1.0,
             ignore_eos,
-        };
+            // Greedy ignores min_p and seed by definition (argmax is
+            // deterministic), but we still carry them so a request that later
+            // switches to sampling stays faithful to its params.
+            min_p,
+            seed,
+        });
     }
 
-    SamplingParams {
+    Ok(SamplingParams {
         temperature: params.temperature,
         top_k: if params.top_k == 0 {
             -1
@@ -63,7 +104,9 @@ pub(crate) fn convert_sampling(params: &EngineCoreSamplingParams) -> SamplingPar
         },
         top_p: params.top_p,
         ignore_eos,
-    }
+        min_p,
+        seed,
+    })
 }
 
 pub(crate) fn requested_logprobs(params: &EngineCoreSamplingParams) -> usize {
@@ -118,17 +161,69 @@ mod tests {
         // _all_stop_token_ids still carries the model EOS set.
         let mut params = EngineCoreSamplingParams::for_test();
         params.all_stop_token_ids = BTreeSet::from([163_586]);
-        assert!(convert_sampling(&params).ignore_eos);
+        assert!(convert_sampling(&params).unwrap().ignore_eos);
 
         // Normal request: _eos_token_id present.
         params.eos_token_id = Some(163_586);
-        assert!(!convert_sampling(&params).ignore_eos);
+        assert!(!convert_sampling(&params).unwrap().ignore_eos);
 
         // Explicit client stop tokens keep EOS detection on even when the
         // frontend dropped _eos_token_id.
         params.eos_token_id = None;
         params.stop_token_ids = vec![42];
-        assert!(!convert_sampling(&params).ignore_eos);
+        assert!(!convert_sampling(&params).unwrap().ignore_eos);
+    }
+
+    #[test]
+    fn convert_sampling_threads_min_p() {
+        let mut params = EngineCoreSamplingParams::for_test();
+        // Default min_p is 0 — disabled, fast path.
+        assert_eq!(convert_sampling(&params).unwrap().min_p, 0.0);
+
+        // A set min_p flows through verbatim.
+        params.min_p = 0.05;
+        assert_eq!(convert_sampling(&params).unwrap().min_p, 0.05);
+
+        // Negative min_p clamps to 0 rather than erroring.
+        params.min_p = -1.0;
+        assert_eq!(convert_sampling(&params).unwrap().min_p, 0.0);
+
+        // min_p > 1 is rejected.
+        params.min_p = 1.5;
+        assert!(convert_sampling(&params).is_err());
+    }
+
+    #[test]
+    fn convert_sampling_threads_seed() {
+        let mut params = EngineCoreSamplingParams::for_test();
+        // Default seed is None — defers to engine-wide seed.
+        assert_eq!(convert_sampling(&params).unwrap().seed, None);
+
+        // A set seed flows through as u64.
+        params.seed = Some(42);
+        assert_eq!(convert_sampling(&params).unwrap().seed, Some(42));
+
+        // Negative seed is rejected.
+        params.seed = Some(-1);
+        assert!(convert_sampling(&params).is_err());
+    }
+
+    #[test]
+    fn convert_sampling_rejects_penalties() {
+        // frequency_penalty
+        let mut params = EngineCoreSamplingParams::for_test();
+        params.frequency_penalty = 0.5;
+        assert!(convert_sampling(&params).is_err());
+
+        // presence_penalty
+        let mut params = EngineCoreSamplingParams::for_test();
+        params.presence_penalty = 0.5;
+        assert!(convert_sampling(&params).is_err());
+
+        // repetition_penalty (default is 1.0 = no-op)
+        let mut params = EngineCoreSamplingParams::for_test();
+        params.repetition_penalty = 1.5;
+        assert!(convert_sampling(&params).is_err());
     }
 
     #[test]

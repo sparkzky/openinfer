@@ -40,6 +40,7 @@ pub fn to_sampling_params(request: &PreprocessedRequest) -> SamplingParams {
         top_k: s.top_k.unwrap_or(-1),
         top_p: s.top_p.unwrap_or(1.0),
         ignore_eos: request.stop_conditions.ignore_eos.unwrap_or(false),
+        ..Default::default()
     }
 }
 

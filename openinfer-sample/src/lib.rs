@@ -182,6 +182,7 @@ pub fn select_batch(
             temperature: p.temperature,
             top_k: p.top_k,
             top_p: p.top_p,
+            min_p: p.min_p,
         })
         .collect();
     if !sampling_rows.is_empty() {

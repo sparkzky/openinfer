@@ -248,12 +248,14 @@ impl LocalEngineBridge {
         let tag: RequestTag = Arc::from(request_id.as_str());
         let cancelled = Arc::new(AtomicBool::new(false));
         let token_tx = TokenSink::new(tag.clone(), event_tx.clone(), Arc::clone(&cancelled));
+        let params = convert_sampling(&sampling_params)
+            .context("rejected sampling params")?;
         self.handle
             .submit(GenerateRequest {
                 request_id: Some(request_id),
                 queued_at_unix_s: Some(request.arrival_time),
                 prompt_tokens,
-                params: convert_sampling(&sampling_params),
+                params,
                 max_tokens: sampling_params.max_tokens as usize,
                 lora_adapter: lora_adapter_from_sampling_params(&sampling_params)?,
                 token_tx,
@@ -261,7 +263,6 @@ impl LocalEngineBridge {
                 echo: false,
             })
             .context("failed to submit request to scheduler")?;
-
         streams.insert(tag, RequestStreamState::new(cancelled));
         Ok(())
     }

@@ -2625,15 +2625,25 @@ impl LocalQwen3Lane {
                 params.len(),
             )?;
         }
+        // FlashInfer's sampling kernels only accept a scalar philox seed
+        // (seed_arr[0] even when an array is passed — see sampling.cuh). To
+        // give a per-request seed meaning without modifying FlashInfer, we XOR
+        // the request seed into the scalar when exactly one request sets one.
+        // This preserves determinism for single-request decode steps; multi-
+        // request batches with mixed seeds share the merged scalar (documented
+        // approximation, to be replaced when FlashInfer exposes per-row seed).
+        let effective_seed = params
+            .iter()
+            .filter_map(|p| p.seed)
+            .fold(sample_seed, |acc, s| acc ^ s.wrapping_mul(0x9E3779B97F4A7C15));
         openinfer_sample::select_batch(
             self.model.device_ctx(),
             logits,
             params,
-            sample_seed,
+            effective_seed,
             &mut self.sample_scratch,
         )
     }
-
     fn extract_logprobs(
         &self,
         logits: &DeviceVec,

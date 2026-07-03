@@ -127,6 +127,7 @@ pub fn trace_runtime_decode_kernel_calls(
                     top_k: 1,
                     top_p: 1.0,
                     ignore_eos: true,
+                    ..Default::default()
                 },
                 max_tokens: 2,
                 lora_adapter: None,
