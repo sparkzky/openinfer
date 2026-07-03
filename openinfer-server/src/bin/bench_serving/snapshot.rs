@@ -10,12 +10,12 @@ use comfy_table::{Cell, CellAlignment};
 use log::info;
 use openinfer::server_engine::ModelType;
 
-use crate::cli::*;
-use crate::exec::*;
-use crate::prompt::*;
-use crate::render::*;
-use crate::report::*;
-use crate::runners::*;
+use crate::cli::{Cli, CompareArgs, MixedArgs, RunArgs, SnapshotArgs};
+use crate::exec::BenchModel;
+use crate::prompt::synthetic_prompt_tokens;
+use crate::render::{key_cell, new_table, numeric_cell, push_table};
+use crate::report::{BenchReport, SnapshotMixedItl, SnapshotProfile, SnapshotReport};
+use crate::runners::{build_request_metrics, measure_timings};
 
 pub(crate) const SNAPSHOT_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench_snapshots");
 pub(crate) const SNAPSHOT_PREFILL_OUTPUT_LEN: usize = 1;
@@ -337,6 +337,7 @@ pub(crate) fn run_compare(args: &CompareArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::float_cmp)] // qps is a snapshot config; an exact match gates the mixed-ITL comparison
 pub(crate) fn render_comparison(
     current: &SnapshotReport,
     baseline: &SnapshotReport,
