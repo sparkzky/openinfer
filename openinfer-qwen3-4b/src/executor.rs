@@ -465,7 +465,7 @@ fn execute_step_on_lane(
                 let mut event: cudarc::driver::sys::CUevent = std::ptr::null_mut();
                 unsafe {
                     cudarc::driver::sys::cuEventCreate(
-                        &mut event,
+                        &raw mut event,
                         cudarc::driver::sys::CUevent_flags_enum::CU_EVENT_DISABLE_TIMING as u32,
                     );
                     cudarc::driver::sys::cuEventRecord(event, prefill_stream.0);
@@ -552,6 +552,7 @@ fn tune_decode_gemm_algos(
     max_prefill_tokens: usize,
     run_envelope_check: bool,
 ) -> Result<()> {
+    use openinfer_kernels::ops::{NumericPolicy, gemm_lt_pin_warmup, numeric_policy};
     let ctx = model.device_ctx();
     let hidden = model.config().hidden_size;
     let vocab = model.config().vocab_size;
@@ -559,7 +560,6 @@ fn tune_decode_gemm_algos(
     let kv_dim = model.local_kv_dim();
     let intermediate = model.local_intermediate_size();
 
-    use openinfer_kernels::ops::{NumericPolicy, gemm_lt_pin_warmup, numeric_policy};
     if numeric_policy() == NumericPolicy::Pin {
         // Eager pin before capture: the lazy pin-workspace alloc is illegal mid-capture.
         gemm_lt_pin_warmup(q_dim, hidden)?;
@@ -1309,9 +1309,8 @@ impl Qwen3Executor {
         // engine-entry guard. launch_gemm_pin also bails on the resulting stream override, but only mid
         // graph-capture/replay (a hot-path failure) — rejecting here moves it to a safe point.
         anyhow::ensure!(
-            !(openinfer_kernels::ops::numeric_policy()
-                == openinfer_kernels::ops::NumericPolicy::Pin
-                && !matches!(overlap, crate::DecodeOverlap::Off)),
+            openinfer_kernels::ops::numeric_policy() != openinfer_kernels::ops::NumericPolicy::Pin
+                || matches!(overlap, crate::DecodeOverlap::Off),
             "--batch-invariant (NumericPolicy::Pin) is not compatible with decode-overlap: the stream override would force the pinned GEMM to bail at runtime"
         );
         let device_ordinal = 0; // single-GPU path
@@ -2018,11 +2017,11 @@ impl ModelExecutor for Qwen3Executor {
     }
 
     fn execute_speculative_draft(&mut self, plan: DraftPlan<'_>) -> Result<DraftResult> {
-        self.execute_speculative_draft_impl(plan)
+        self.execute_speculative_draft_impl(&plan)
     }
 
     fn execute_speculative_verify(&mut self, plan: VerifyPlan<'_>) -> Result<VerifyResult> {
-        self.execute_speculative_verify_impl(plan)
+        self.execute_speculative_verify_impl(&plan)
     }
 
     fn speculative_enabled(&self) -> bool {
@@ -2375,13 +2374,11 @@ impl ModelExecutor for Qwen3Executor {
         }
 
         // Ask worker to sync + sample the prefill result.
-        let rx = match self.primary.resolve_prefill() {
-            Ok(rx) => rx,
-            Err(_) => return None,
+        let Ok(rx) = self.primary.resolve_prefill() else {
+            return None;
         };
-        let result = match rx.recv() {
-            Ok(Ok(r)) => r,
-            _ => return None,
+        let Ok(Ok(result)) = rx.recv() else {
+            return None;
         };
 
         // Apply prefill results (KV commit)

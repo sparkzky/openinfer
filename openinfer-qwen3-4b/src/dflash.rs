@@ -793,6 +793,7 @@ impl DFlashDraftModel {
         self.config.hidden_size * self.target_layer_ids().len()
     }
 
+    #[allow(clippy::unnecessary_wraps)] // GPU proj/norm ops are infallible today; kept in Result for symmetry with the DFlash forward path
     fn project_context_into(
         &self,
         ctx: &DeviceContext,
@@ -815,6 +816,7 @@ impl DFlashDraftModel {
         Ok(())
     }
 
+    #[allow(clippy::unnecessary_wraps)] // GPU logit/norm ops are infallible today; kept in Result for symmetry with the DFlash forward path
     fn compute_logits_with_target_head_into(
         &self,
         target: &Qwen3Model,
@@ -874,7 +876,7 @@ mod tests {
             .expect("DFlash config should match target");
 
         assert_eq!(dflash.block_size, 16);
-        assert_eq!(dflash.mask_token_id, 151669);
+        assert_eq!(dflash.mask_token_id, 151_669);
         assert_eq!(dflash.target_layer_ids, vec![1, 9, 17, 25, 33]);
 
         // Pin the memory reservation the KV budget bills against. The per-token

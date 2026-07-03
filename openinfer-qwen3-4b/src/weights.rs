@@ -1039,6 +1039,7 @@ impl Qwen3Model {
         }
     }
 
+    #[allow(clippy::unused_self)] // private kv-budget helpers; grouped on the impl for cohesion, not state
     fn kv_bytes_per_block(&self, geometry: &KvBudget) -> usize {
         let layout = openinfer_kv_cache::KvLayout::new(
             geometry.num_layers,
@@ -1049,6 +1050,7 @@ impl Qwen3Model {
         layout.page_stride * std::mem::size_of::<half::bf16>()
     }
 
+    #[allow(clippy::unused_self)] // private kv-budget helpers; grouped on the impl for cohesion, not state
     fn kv_budget_from_bytes(
         &self,
         mut geometry: KvBudget,

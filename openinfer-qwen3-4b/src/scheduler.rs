@@ -1187,10 +1187,7 @@ fn failure_targets_for(
         self::plan::ExecutionPlan::Prefill { pending } => {
             targets.extend(pending.iter().map(pending_failure_target));
         }
-        self::plan::ExecutionPlan::Decode => {
-            targets.extend(active.iter().map(active_failure_target));
-        }
-        self::plan::ExecutionPlan::SpeculativeDecode => {
+        self::plan::ExecutionPlan::Decode | self::plan::ExecutionPlan::SpeculativeDecode => {
             targets.extend(active.iter().map(active_failure_target));
         }
         self::plan::ExecutionPlan::Unified { pending } => {

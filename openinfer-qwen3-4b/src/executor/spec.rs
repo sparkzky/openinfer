@@ -14,7 +14,7 @@ use super::{Qwen3Executor, RequestId, StepCommand, WorkerStepOutcome};
 impl Qwen3Executor {
     pub(super) fn execute_speculative_verify_impl(
         &mut self,
-        plan: VerifyPlan<'_>,
+        plan: &VerifyPlan<'_>,
     ) -> Result<VerifyResult> {
         anyhow::ensure!(
             self.speculative.is_some(),
@@ -139,7 +139,7 @@ impl Qwen3Executor {
 
     pub(super) fn execute_speculative_draft_impl(
         &mut self,
-        plan: DraftPlan<'_>,
+        plan: &DraftPlan<'_>,
     ) -> Result<DraftResult> {
         anyhow::ensure!(
             self.speculative.is_some(),
@@ -173,8 +173,8 @@ impl Qwen3Executor {
     /// via RAII); the reverse order here just mirrors schedule order and is
     /// cosmetic.
     fn revert_speculative_schedules(&mut self, request_ids: &[RequestId]) {
-        for request_id in request_ids.iter().rev().copied() {
-            let Some(rkv) = self.request_kvs.get_mut(&request_id) else {
+        for request_id in request_ids.iter().rev() {
+            let Some(rkv) = self.request_kvs.get_mut(request_id) else {
                 log::warn!(
                     "missing RequestKv while reverting speculative schedule for {request_id:?}"
                 );

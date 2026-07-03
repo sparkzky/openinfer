@@ -40,11 +40,11 @@ pub(crate) struct Config {
 
 /// Resolved drafter config, shared by DFlash and DSpark (DSpark = DFlash backbone
 /// + a Markov head + an optional confidence head). `markov_rank == 0` is plain
-/// DFlash. Two on-disk schemas are normalized into this in `from_file`:
-/// our `Qwen3-4B-DFlash-b16` nests `dflash_config: {mask_token_id,
-/// target_layer_ids}` and puts `rope_theta` at the top level; DeepSpec's
-/// `dflash_/dspark_*_block7` put those fields flat and nest `rope_theta` under
-/// `rope_parameters`.
+///   DFlash. Two on-disk schemas are normalized into this in `from_file`:
+///   our `Qwen3-4B-DFlash-b16` nests `dflash_config: {mask_token_id,
+///   target_layer_ids}` and puts `rope_theta` at the top level; DeepSpec's
+///   `dflash_/dspark_*_block7` put those fields flat and nest `rope_theta` under
+///   `rope_parameters`.
 #[derive(Clone, Debug)]
 pub(crate) struct DFlashConfig {
     pub(crate) hidden_size: usize,
@@ -273,6 +273,10 @@ impl DFlashConfig {
         self.anchor_first
     }
 
+    // `rope_theta` is loaded verbatim from the model JSON of both the target and
+    // the drafter; an exact match is required, so the lint's epsilon suggestion
+    // would mask a genuine config mismatch.
+    #[allow(clippy::float_cmp)]
     pub(crate) fn validate_for_target(&self, target: &Config) -> Result<()> {
         anyhow::ensure!(
             self.hidden_size == target.hidden_size,
