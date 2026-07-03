@@ -75,6 +75,9 @@ impl CudaGraphState {
         self.run_or_capture_synchronized(ctx, |_| {}, kernels)
     }
 
+    /// `_ctx` is intentionally write-only (holds ctx alive for the graph lifetime);
+    /// silence `used_underscore_binding` for this capture method.
+    #[allow(clippy::used_underscore_binding)]
     pub fn run_or_capture_synchronized<F, S>(
         &mut self,
         ctx: &DeviceContext,
@@ -109,7 +112,7 @@ impl CudaGraphState {
         // stuck in the capturing state, then propagate the original error.
         if let Err(e) = kernels() {
             let mut aborted: CUgraph = std::ptr::null_mut();
-            unsafe { sys::cuStreamEndCapture(stream, &mut aborted) };
+            unsafe { sys::cuStreamEndCapture(stream, &raw mut aborted) };
             if !aborted.is_null() {
                 unsafe { sys::cuGraphDestroy(aborted) };
             }
@@ -119,14 +122,14 @@ impl CudaGraphState {
         synchronize(CudaGraphPhase::BeforeEndCapture);
         let mut graph: CUgraph = std::ptr::null_mut();
         check(
-            unsafe { sys::cuStreamEndCapture(stream, &mut graph) },
+            unsafe { sys::cuStreamEndCapture(stream, &raw mut graph) },
             "cuStreamEndCapture",
         )?;
         let mut exec: CUgraphExec = std::ptr::null_mut();
         check(
             unsafe {
                 sys::cuGraphInstantiateWithFlags(
-                    &mut exec,
+                    &raw mut exec,
                     graph,
                     CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH as u64,
                 )
