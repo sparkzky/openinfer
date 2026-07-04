@@ -1,0 +1,7 @@
+# Keep the build context small — the Dockerfile only COPYs rust-toolchain.toml.
+target/
+.git/
+models/
+.venv/
+.triton-venv/
+*.log

@@ -1,0 +1,24 @@
+{
+  "name": "openinfer-dev",
+  "build": {
+    "dockerfile": "../Dockerfile",
+    "context": ".."
+  },
+  "workspaceFolder": "/workspaces/openinfer",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/openinfer,type=bind,consistency=cached",
+  "remoteUser": "openinfer",
+  "runArgs": ["--gpus=all", "--shm-size=1g"],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "ms-vscode.cpptools",
+        "ms-python.python",
+        "NVIDIA.nsight-vscode-edition"
+      ],
+      "settings": {
+        "rust-analyzer.linkedProjects": ["Cargo.toml"]
+      }
+    }
+  }
+}
