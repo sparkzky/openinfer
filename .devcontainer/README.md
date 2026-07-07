@@ -26,6 +26,17 @@ cargo test --release --workspace --lib
 > No GPU inside the build? `build.rs` needs an SM target, so pass one explicitly:
 > `OPENINFER_CUDA_SM=120 cargo build --release` (e.g. `86`, `90a`, `120`).
 
+> The default build compiles FlashInfer-backed CUDA kernels
+> (`csrc/shared/flashinfer_*.cu`, `paged_attention.cu`) whose headers live in
+> the `openinfer-kernels/third_party/flashinfer` submodule. The devcontainer's
+> `postCreateCommand` initializes it automatically. If you use the image with
+> plain `docker run` instead, init it yourself:
+> `git submodule update --init --recursive openinfer-kernels/third_party/flashinfer`.
+
+> Feature-gated model lines (`deepseek-v4`, `kimi-k2`, `glm52`, `moe`) need
+> their own submodules (DeepEP, DeepGEMM, FlashMLA); run
+> `git submodule update --init --recursive` for those.
+
 ## Opt-in: Triton for `qwen35-4b`
 
 The default build needs no Python. For the `qwen35-4b` feature (build-time Triton

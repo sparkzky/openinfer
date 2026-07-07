@@ -33,7 +33,6 @@ RUN apt-get update \
       libclang-dev \
       curl \
       ca-certificates \
-      git \
       python3 \
       python3-venv \
  && rm -rf /var/lib/apt/lists/*

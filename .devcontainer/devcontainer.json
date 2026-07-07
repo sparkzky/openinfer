@@ -8,6 +8,7 @@
   "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/openinfer,type=bind,consistency=cached",
   "remoteUser": "openinfer",
   "runArgs": ["--gpus=all", "--shm-size=1g"],
+  "postCreateCommand": "git submodule update --init --recursive openinfer-kernels/third_party/flashinfer",
   "customizations": {
     "vscode": {
       "extensions": [
