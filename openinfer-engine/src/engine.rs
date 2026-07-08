@@ -79,6 +79,12 @@ pub struct GenerateRequest {
     pub token_tx: TokenSink,
     pub logprobs: usize,
     pub echo: bool,
+    /// Explicit "prefill only" semantics (#526): the request wants its prompt
+    /// prefilled (KV computed) and then immediately finished, emitting zero
+    /// completion tokens. Routes to `PendingEffect::Finish` so the request
+    /// still traverses the normal finish/KV-release path. Defaults to `false`
+    /// so ordinary requests are unaffected.
+    pub prefill_only: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

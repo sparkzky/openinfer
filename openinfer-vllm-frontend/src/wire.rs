@@ -8,6 +8,7 @@ use openinfer_engine::engine::{FinishReason, TokenLogprob};
 use openinfer_engine::sampler::SamplingParams;
 
 pub(crate) const LORA_ADAPTER_XARG: &str = "openinfer_lora_adapter";
+pub(crate) const PREFILL_ONLY_XARG: &str = "openinfer_prefill_only";
 
 pub(crate) fn to_wire_position_logprobs(
     token_id: u32,
@@ -132,6 +133,26 @@ pub(crate) fn lora_adapter_from_sampling_params(
     }
 }
 
+/// Extract the `openinfer_prefill_only` extended argument. Unlike the LoRA
+/// adapter (an `Option<String>` defaulting to `None`), `prefill_only` is a
+/// `bool` with a natural default of `false`, so the missing-key path returns
+/// `Ok(false)` to match the `GenerateRequest.prefill_only` field type. A key
+/// present with a non-boolean value is a client error.
+pub(crate) fn prefill_only_from_sampling_params(
+    params: &EngineCoreSamplingParams,
+) -> Result<bool> {
+    let Some(extra_args) = params.extra_args.as_ref() else {
+        return Ok(false);
+    };
+    let Some(value) = extra_args.get(PREFILL_ONLY_XARG) else {
+        return Ok(false);
+    };
+    match value.as_bool() {
+        Some(b) => Ok(b),
+        None => bail!("{PREFILL_ONLY_XARG} must be a boolean"),
+    }
+}
+
 pub(crate) fn convert_finish_reason(reason: FinishReason) -> EngineCoreFinishReason {
     match reason {
         FinishReason::Length => EngineCoreFinishReason::Length,
@@ -235,6 +256,56 @@ mod tests {
                 .expect("extract adapter")
                 .as_deref(),
             Some("adapter-a")
+        );
+    }
+
+    #[test]
+    fn prefill_only_from_sampling_params_reads_boolean_xarg() {
+        // Explicit true.
+        let mut params = EngineCoreSamplingParams::for_test();
+        params.extra_args = Some(HashMap::from([(
+            PREFILL_ONLY_XARG.to_string(),
+            serde_json::Value::Bool(true),
+        )]));
+        assert!(
+            prefill_only_from_sampling_params(&params).expect("extract prefill_only"),
+            "explicit true must parse"
+        );
+
+        // Explicit false.
+        params.extra_args = Some(HashMap::from([(
+            PREFILL_ONLY_XARG.to_string(),
+            serde_json::Value::Bool(false),
+        )]));
+        assert!(
+            !prefill_only_from_sampling_params(&params).expect("extract prefill_only"),
+            "explicit false must parse"
+        );
+
+        // Missing key defaults to false (matches the GenerateRequest field type).
+        params.extra_args = Some(HashMap::new());
+        assert!(
+            !prefill_only_from_sampling_params(&params).expect("default prefill_only"),
+            "absent key must default to false"
+        );
+
+        // No extra_args at all also defaults to false.
+        params.extra_args = None;
+        assert!(
+            !prefill_only_from_sampling_params(&params).expect("default prefill_only"),
+            "absent extra_args must default to false"
+        );
+
+        // Wrong type is a client error.
+        params.extra_args = Some(HashMap::from([(
+            PREFILL_ONLY_XARG.to_string(),
+            serde_json::Value::String("true".to_string()),
+        )]));
+        let err = prefill_only_from_sampling_params(&params)
+            .expect_err("non-boolean must be rejected");
+        assert!(
+            err.to_string().contains("must be a boolean"),
+            "error should name the type requirement, got: {err}"
         );
     }
 

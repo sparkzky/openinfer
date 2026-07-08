@@ -194,6 +194,7 @@ mod tests {
                 token_tx,
                 logprobs: 1,
                 echo: false,
+                prefill_only: false,
             },
             config,
         )

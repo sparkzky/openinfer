@@ -135,6 +135,7 @@ pub fn trace_runtime_decode_kernel_calls(
                 token_tx,
                 logprobs: 0,
                 echo: false,
+                prefill_only: false,
             })?;
             receivers.push(std::thread::spawn(move || -> Result<()> {
                 while let Some((_, event)) = token_rx.blocking_recv() {

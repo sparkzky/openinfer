@@ -51,6 +51,7 @@ fn run_and_capture_cached(handle: &EngineHandle, prompt_tokens: Vec<u32>) -> usi
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

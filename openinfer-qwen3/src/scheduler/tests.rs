@@ -719,6 +719,7 @@ fn pending(request_id: u64, echo: bool) -> PendingRequest {
         token_tx,
         logprobs: 0,
         echo,
+        prefill_only: false,
         queued_at_unix_s: None,
         prefetch_offered: false,
         prefill_pos: 0,
@@ -765,6 +766,7 @@ fn request(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         },
         token_rx,
     )
@@ -777,6 +779,15 @@ fn request_with_lora(
 ) -> (GenerateRequest, openinfer_core::engine::TokenStreamReceiver) {
     let (mut request, token_rx) = request(prompt_len, max_tokens);
     request.lora_adapter = lora_adapter.map(ToString::to_string);
+    (request, token_rx)
+}
+
+fn request_prefill_only(
+    prompt_len: usize,
+    max_tokens: usize,
+) -> (GenerateRequest, openinfer_core::engine::TokenStreamReceiver) {
+    let (mut request, token_rx) = request(prompt_len, max_tokens);
+    request.prefill_only = true;
     (request, token_rx)
 }
 
@@ -831,6 +842,91 @@ fn unknown_lora_request_is_rejected_without_blocking_base_request() {
             Some(TokenEvent::Finished { .. })
         ),
         "base request should finish"
+    );
+}
+
+#[test]
+fn prefill_only_request_finishes_with_zero_completion_tokens() {
+    // prefill_only contract (#526, tier 1): the prompt is prefilled (KV
+    // computed) and the request finishes immediately, emitting ZERO completion
+    // tokens via PendingEffect::Finish. max_tokens is deliberately > 1 to prove
+    // the short-circuit overrides the `max_tokens <= 1` EmitAndFinish path that
+    // the old hack relied on.
+    let dropped = Arc::new(Mutex::new(Vec::new()));
+    let executor = FakeExecutor::new(4, Arc::clone(&dropped));
+    let handle = start_with_executor(executor, 42, DEFAULT_MAX_PREFILL_TOKENS);
+
+    let (req, mut rx) = request_prefill_only(16, 8);
+    handle.submit(req).expect("submit prefill_only");
+
+    // Event sequence is Scheduled -> Finished with NO TokenEvent::Token between.
+    match rx.blocking_recv() {
+        Some((_, TokenEvent::Scheduled { prompt_tokens, .. })) => {
+            assert_eq!(prompt_tokens, 16);
+        }
+        other => panic!("first event must be Scheduled, got {other:?}"),
+    }
+    match rx.blocking_recv() {
+        Some((
+            _,
+            TokenEvent::Finished {
+                finish_reason,
+                prompt_tokens,
+                completion_tokens,
+            },
+        )) => {
+            assert_eq!(finish_reason, FinishReason::Length);
+            assert_eq!(prompt_tokens, 16);
+            assert_eq!(
+                completion_tokens, 0,
+                "prefill_only must never emit completion tokens"
+            );
+        }
+        other => panic!("expected Finished with zero tokens, got {other:?}"),
+    }
+}
+
+#[test]
+fn prefill_only_request_does_not_block_normal_request_in_mixed_batch() {
+    // One normal request (still generates) + one prefill_only request (finishes
+    // at zero) share the scheduler. Proves prefill_only introduces no regression
+    // for ordinary generation admitted in the same batch.
+    let dropped = Arc::new(Mutex::new(Vec::new()));
+    let executor = FakeExecutor::new(4, Arc::clone(&dropped));
+    let handle = start_with_executor(executor, 42, DEFAULT_MAX_PREFILL_TOKENS);
+
+    let (normal, mut normal_rx) = request(16, 1);
+    let (prefill, mut prefill_rx) = request_prefill_only(16, 8);
+    handle.submit(normal).expect("submit normal");
+    handle.submit(prefill).expect("submit prefill_only");
+
+    // Normal request still emits its first token, then finishes — unchanged.
+    assert!(
+        matches!(
+            recv_skipping_scheduled(&mut normal_rx),
+            Some(TokenEvent::Token { id, .. }) if id == 100,
+        ),
+        "normal request should still emit its first token"
+    );
+    assert!(
+        matches!(
+            recv_skipping_scheduled(&mut normal_rx),
+            Some(TokenEvent::Finished { completion_tokens, .. }) if completion_tokens == 1,
+        ),
+        "normal request should finish with one completion token"
+    );
+
+    // Prefill_only request emits no token — straight to Finished at zero.
+    assert!(
+        matches!(
+            recv_skipping_scheduled(&mut prefill_rx),
+            Some(TokenEvent::Finished {
+                completion_tokens,
+                finish_reason: FinishReason::Length,
+                ..
+            }) if completion_tokens == 0,
+        ),
+        "prefill_only request should finish with zero completion tokens and no token"
     );
 }
 

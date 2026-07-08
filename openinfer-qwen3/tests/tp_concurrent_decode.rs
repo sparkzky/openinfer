@@ -89,6 +89,7 @@ fn tp2_concurrent_decode_completes() {
                     token_tx,
                     logprobs: 0,
                     echo: false,
+                    prefill_only: false,
                 })
                 .expect("submit failed");
             rx

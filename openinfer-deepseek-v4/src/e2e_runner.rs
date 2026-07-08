@@ -216,6 +216,7 @@ fn generate_text(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .context("submit generation request")?;
 

@@ -62,6 +62,7 @@ fn generate_text(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 
@@ -112,6 +113,7 @@ fn oversized_prompt_is_rejected_with_context_length_error() {
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

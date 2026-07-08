@@ -289,6 +289,7 @@ impl LLMEngine for OpeninferBackend {
             // full-vocab O(V) logprob pass for a value we would then drop.
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         };
 
         if handle.submit(req).is_err() {

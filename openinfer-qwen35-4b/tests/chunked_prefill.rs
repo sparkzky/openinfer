@@ -68,6 +68,7 @@ fn generate(handle: &EngineHandle, prompt_tokens: Vec<u32>) -> (Vec<u32>, Finish
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

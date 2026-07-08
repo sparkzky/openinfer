@@ -77,6 +77,7 @@ fn in_window_prompt_past_old_rope_table_is_served() {
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

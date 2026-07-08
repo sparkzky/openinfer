@@ -132,6 +132,7 @@ fn generate_tokens_with_logprobs(
             token_tx,
             logprobs,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 
@@ -221,6 +222,7 @@ fn expect_context_window_rejection(handle: &EngineHandle, max_context_tokens: us
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit over-context request");
 
@@ -446,6 +448,7 @@ fn test_e2e_qwen35_scheduler() {
                     token_tx,
                     logprobs: 0,
                     echo: false,
+                    prefill_only: false,
                 })
                 .expect("submit failed");
             receivers.push((case.name.to_string(), 0, token_rx));
@@ -485,6 +488,7 @@ fn test_e2e_qwen35_scheduler() {
                     token_tx,
                     logprobs,
                     echo: false,
+                    prefill_only: false,
                 })
                 .expect("submit failed");
             receivers.push((name, logprobs, token_rx));
@@ -525,6 +529,7 @@ fn test_e2e_qwen35_scheduler() {
                 token_tx,
                 logprobs: 0,
                 echo: false,
+                prefill_only: false,
             })
             .expect("submit failed");
         std::thread::sleep(std::time::Duration::from_millis(500));

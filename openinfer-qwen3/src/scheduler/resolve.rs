@@ -128,6 +128,22 @@ fn resolve_prefill_outputs(
             continue;
         }
 
+        // prefill_only (#526): the request wants only the prompt prefilled —
+        // emit no completion token and finish immediately, traversing the
+        // normal finish/KV-release path. Must precede the echo and
+        // `max_tokens <= 1` EmitAndFinish branches so a prefill_only request
+        // never leaks a token.
+        if req.prefill_only {
+            effects.pending.push(PendingEffect::Finish {
+                request_id: req.request_id,
+                token_tx: req.token_tx,
+                finish_reason: FinishReason::Length,
+                prompt_tokens: prompt_len,
+                completion_tokens: 0,
+            });
+            continue;
+        }
+
         if req.echo {
             effects.prompt_echoes.push(PromptEchoEffect {
                 token_tx: req.token_tx.clone(),

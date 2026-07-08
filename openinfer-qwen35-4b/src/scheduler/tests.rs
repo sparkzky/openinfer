@@ -13,6 +13,7 @@ fn send_rejection_reports_kv_lifetime_request_tokens() {
         token_tx,
         logprobs: 0,
         echo: false,
+        prefill_only: false,
     };
 
     send_rejection(&req, RejectReason::KvBudget);
@@ -47,6 +48,7 @@ fn send_rejection_reports_context_window_limit() {
         token_tx,
         logprobs: 0,
         echo: false,
+        prefill_only: false,
     };
 
     send_rejection(&req, RejectReason::ContextLength { limit: 32 });

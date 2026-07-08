@@ -340,6 +340,7 @@ fn submit(
             token_tx: tx,
             logprobs,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit to kimi engine");
     PendingRequest { label, rx }

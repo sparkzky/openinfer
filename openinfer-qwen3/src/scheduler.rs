@@ -61,6 +61,7 @@ pub(super) struct PendingRequest {
     pub(super) token_tx: TokenSink,
     pub(super) logprobs: usize,
     pub(super) echo: bool,
+    pub(super) prefill_only: bool,
     pub(super) queued_at_unix_s: Option<f64>,
     /// Whether this request has already been offered to async KV prefetch.
     /// Offered at most once; a no-hit offer leaves the request in the normal
@@ -89,6 +90,7 @@ impl PendingRequest {
             token_tx: req.token_tx,
             logprobs: req.logprobs,
             echo: req.echo,
+            prefill_only: req.prefill_only,
             queued_at_unix_s: req.queued_at_unix_s,
             prefetch_offered: false,
             prefill_pos: 0,

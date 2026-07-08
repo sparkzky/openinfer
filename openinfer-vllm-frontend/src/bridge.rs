@@ -28,8 +28,8 @@ use openinfer_engine::engine::{
 };
 
 use crate::wire::{
-    convert_finish_reason, convert_sampling, lora_adapter_from_sampling_params, requested_logprobs,
-    to_wire_position_logprobs,
+    convert_finish_reason, convert_sampling, lora_adapter_from_sampling_params, prefill_only_from_sampling_params,
+    requested_logprobs, to_wire_position_logprobs,
 };
 
 const ENGINE_INDEX: u32 = 0;
@@ -272,6 +272,7 @@ impl LocalEngineBridge {
                 params: convert_sampling(&sampling_params),
                 max_tokens: sampling_params.max_tokens as usize,
                 lora_adapter: lora_adapter_from_sampling_params(&sampling_params)?,
+                prefill_only: prefill_only_from_sampling_params(&sampling_params)?,
                 token_tx,
                 logprobs: requested_logprobs(&sampling_params),
                 echo: false,

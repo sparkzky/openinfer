@@ -287,6 +287,7 @@ fn measure_decode_stream(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .map_err(|e| anyhow!("scheduler submit failed: {e}"))?;
 

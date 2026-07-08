@@ -146,6 +146,7 @@ fn generate(
             token_tx,
             logprobs,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 
@@ -188,6 +189,7 @@ fn generate_concurrent(handle: &EngineHandle, requests: Vec<(Vec<u32>, usize)>) 
                     token_tx,
                     logprobs: 0,
                     echo: false,
+                    prefill_only: false,
                 })
                 .expect("submit failed");
             rx
@@ -240,6 +242,7 @@ fn prefill_next(handle: &EngineHandle, context: Vec<u32>, logprobs: usize) -> St
             token_tx,
             logprobs,
             echo: true,
+            prefill_only: false,
         })
         .expect("submit failed");
 
@@ -689,6 +692,7 @@ fn dflash_request_in_draft_headroom_is_rejected_not_panicked() {
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

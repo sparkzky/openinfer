@@ -622,6 +622,7 @@ fn run_mixed_serving_generation(model_path: &Path, model_path_label: &str) -> Re
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         };
         receivers.push((id, token_rx));
         requests.push(req);
@@ -697,6 +698,7 @@ fn run_mixed_serving_position_fallback(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         };
         receivers.push((id, token_rx));
         requests.push(req);
@@ -762,6 +764,7 @@ fn run_mixed_serving_rejection_isolation(
         token_tx: invalid_tx,
         logprobs: 1,
         echo: false,
+        prefill_only: false,
     };
 
     let (valid_tx, mut valid_rx) = TokenSink::standalone();
@@ -775,6 +778,7 @@ fn run_mixed_serving_rejection_isolation(
         token_tx: valid_tx,
         logprobs: 0,
         echo: false,
+        prefill_only: false,
     };
     submit_concurrently(handle, vec![invalid_req, valid_req])?;
 

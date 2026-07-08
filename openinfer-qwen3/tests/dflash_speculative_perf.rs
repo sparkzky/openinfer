@@ -88,6 +88,7 @@ fn timed_generate(handle: &EngineHandle, prompt_tokens: Vec<u32>) -> (usize, Dur
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

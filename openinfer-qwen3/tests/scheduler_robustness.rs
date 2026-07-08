@@ -65,6 +65,7 @@ fn generate_text(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 
@@ -133,6 +134,7 @@ fn scheduler_survives_consumer_drop() {
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
     std::thread::sleep(Duration::from_millis(500));

@@ -102,6 +102,7 @@ fn generate_tokens(
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
         })
         .expect("submit failed");
 

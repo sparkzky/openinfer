@@ -263,6 +263,7 @@ mod tests {
             token_tx,
             logprobs: 0,
             echo: false,
+            prefill_only: false,
             queued_at_unix_s: None,
             prefetch_offered: false,
             prefill_pos: 0,
